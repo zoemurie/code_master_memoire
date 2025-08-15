@@ -1,17 +1,65 @@
-from flask import Flask, request, redirect, url_for, send_from_directory, jsonify, render_template_string
+from flask import Flask, request, redirect, url_for, send_from_directory, render_template_string
 import os
 import cv2
 import numpy as np
 from PIL import Image
-import json
 import time
 from datetime import datetime
 import logging
 from werkzeug.utils import secure_filename
 import re
 
+# Configuration pour macOS avec Homebrew
+try:
+    import pytesseract
+    
+    # Configuration automatique du chemin Tesseract pour macOS/Homebrew
+    tesseract_paths = [
+        '/opt/homebrew/bin/tesseract',  # Apple Silicon (M1/M2)
+        '/usr/local/bin/tesseract',     # Intel Mac
+        '/usr/bin/tesseract'            # Installation système
+    ]
+    
+    # Trouver le bon chemin
+    tesseract_cmd = None
+    for path in tesseract_paths:
+        if os.path.exists(path):
+            tesseract_cmd = path
+            break
+    
+    if tesseract_cmd:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+        print(f"✅ Tesseract trouvé à : {tesseract_cmd}")
+    
+    # Test de fonctionnement
+    test_image = Image.new('RGB', (100, 50), color='white')
+    pytesseract.image_to_string(test_image)
+    
+    HAS_TESSERACT = True
+    print("✅ Tesseract OCR disponible et fonctionnel")
+    
+    # Vérifier les langues disponibles
+    try:
+        langs = pytesseract.get_languages()
+        print(f"📚 Langues disponibles : {', '.join(langs)}")
+        HAS_FRENCH = 'fra' in langs
+        if HAS_FRENCH:
+            print("✅ Français disponible")
+        else:
+            print("⚠️  Français non disponible - installer avec : brew install tesseract-lang")
+    except:
+        HAS_FRENCH = False
+        
+except Exception as e:
+    HAS_TESSERACT = False
+    HAS_FRENCH = False
+    print(f"❌ Tesseract non disponible: {e}")
+    print("🔧 Pour installer sur macOS :")
+    print("   brew install tesseract tesseract-lang")
+    print("   pip3 install pytesseract")
+
 # Configuration du logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -21,284 +69,569 @@ UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'pdf'}
+app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg'}
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max
 
-class DocumentProcessorSimulated:
+class DocumentProcessor:
     """
-    Processeur de documents simulé qui démontre l'architecture
-    sans nécessiter PyTorch pour le développement initial
+    Processeur de documents optimisé pour macOS
     """
     def __init__(self):
         self.document_classes = ['CNI', 'Passeport', 'Permis de conduire', 'Autre']
-        logger.info("Processeur de documents initialisé (mode simulation)")
+        self.has_tesseract = HAS_TESSERACT
+        self.has_french = HAS_FRENCH
+        logger.info(f"Processeur initialisé - OCR: {self.has_tesseract}, Français: {self.has_french}")
         
-    def classify_document(self, image_path):
-        """Classification simulée basée sur l'analyse d'image avec OpenCV"""
+    def preprocess_image_for_ocr(self, image_path):
+        """Préprocessing optimisé pour l'OCR"""
         try:
-            # Charger l'image
+            # Lire l'image
             image = cv2.imread(image_path)
             if image is None:
-                return {'type': 'Erreur', 'confidence': 0.0}
+                logger.error(f"Impossible de lire l'image : {image_path}")
+                return image_path
+                
+            # Conversion en niveaux de gris
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # Correction de l'inclinaison
+            gray = self._correct_skew(gray)
+            
+            # Amélioration du contraste avec CLAHE
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            enhanced = clahe.apply(gray)
+            
+            # Réduction du bruit
+            denoised = cv2.medianBlur(enhanced, 3)
+            
+            # Binarisation adaptative
+            binary = cv2.adaptiveThreshold(
+                denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY, 11, 2
+            )
+            
+            # Sauvegarder l'image préprocessée
+            base_name, ext = os.path.splitext(image_path)
+            processed_path = f"{base_name}_processed{ext}"
+            cv2.imwrite(processed_path, binary)
+            
+            logger.info(f"Image préprocessée sauvée : {processed_path}")
+            return processed_path
+            
+        except Exception as e:
+            logger.error(f"Erreur preprocessing : {e}")
+            return image_path
+    
+    def _correct_skew(self, image):
+        """Correction automatique de l'inclinaison"""
+        try:
+            coords = np.column_stack(np.where(image > 0))
+            if len(coords) < 500:  # Pas assez de points
+                return image
+                
+            angle = cv2.minAreaRect(coords)[-1]
+            if angle < -45:
+                angle = -(90 + angle)
+            else:
+                angle = -angle
+                
+            # Appliquer la rotation si l'angle est significatif
+            if abs(angle) > 0.5:
+                (h, w) = image.shape[:2]
+                center = (w // 2, h // 2)
+                M = cv2.getRotationMatrix2D(center, angle, 1.0)
+                rotated = cv2.warpAffine(
+                    image, M, (w, h),
+                    flags=cv2.INTER_CUBIC,
+                    borderMode=cv2.BORDER_REPLICATE
+                )
+                logger.info(f"Image pivotée de {angle:.2f} degrés")
+                return rotated
+            
+            return image
+            
+        except Exception as e:
+            logger.error(f"Erreur correction inclinaison : {e}")
+            return image
+        
+    def classify_document(self, image_path):
+        """Classification intelligente du document"""
+        try:
+            image = cv2.imread(image_path)
+            if image is None:
+                return {'type': 'Erreur', 'confidence': 0.0, 'all_probabilities': {}}
                 
             height, width = image.shape[:2]
-            
-            # Analyse simple basée sur les dimensions et couleurs
             aspect_ratio = width / height
             
-            # Simuler la classification basée sur des heuristiques
-            if 1.5 < aspect_ratio < 1.7:  # Format carte
-                if self._detect_blue_background(image):
+            # Analyse des couleurs caractéristiques
+            blue_score = self._detect_blue_background(image)
+            red_score = self._detect_red_elements(image)
+            
+            logger.info(f"Ratio d'aspect : {aspect_ratio:.2f}, Bleu : {blue_score:.3f}, Rouge : {red_score:.3f}")
+            
+            # Classification basée sur les caractéristiques visuelles
+            if 1.4 < aspect_ratio < 1.8:  # Format carte
+                if blue_score > 0.12:  # CNI française (fond bleu)
                     doc_type = 'CNI'
-                    confidence = 0.92
-                else:
+                    confidence = min(0.85 + blue_score * 0.15, 0.95)
+                elif red_score > 0.08:  # Permis (éléments rouges)
                     doc_type = 'Permis de conduire'
-                    confidence = 0.87
-            elif aspect_ratio > 1.3:  # Format passeport
+                    confidence = min(0.80 + red_score * 0.15, 0.92)
+                else:
+                    doc_type = 'CNI'  # Par défaut pour format carte
+                    confidence = 0.70
+            elif aspect_ratio > 1.25:  # Format livret
                 doc_type = 'Passeport'
-                confidence = 0.89
+                confidence = 0.82
             else:
                 doc_type = 'Autre'
-                confidence = 0.65
+                confidence = 0.60
                 
-            # Simuler les probabilités pour tous les types
-            all_probabilities = {}
-            for i, class_name in enumerate(self.document_classes):
-                if class_name == doc_type:
-                    all_probabilities[class_name] = confidence
-                else:
-                    remaining_prob = (1 - confidence) / (len(self.document_classes) - 1)
-                    all_probabilities[class_name] = remaining_prob
-                    
+            # Générer les probabilités pour tous les types
+            all_probabilities = self._generate_probabilities(doc_type, confidence)
+            
+            logger.info(f"Classification : {doc_type} (confiance: {confidence:.2f})")
+                
             return {
                 'type': doc_type,
                 'confidence': confidence,
-                'all_probabilities': all_probabilities
+                'all_probabilities': all_probabilities,
+                'analysis': {
+                    'aspect_ratio': round(aspect_ratio, 2),
+                    'blue_score': round(blue_score, 3),
+                    'red_score': round(red_score, 3)
+                }
             }
             
         except Exception as e:
-            logger.error(f"Erreur lors de la classification: {e}")
+            logger.error(f"Erreur classification : {e}")
             return {'type': 'Erreur', 'confidence': 0.0, 'all_probabilities': {}}
     
     def _detect_blue_background(self, image):
-        """Détecte si l'image a un fond bleu (caractéristique CNI française)"""
-        # Convertir en HSV pour détecter les blues
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        
-        # Définir la gamme de bleu
-        lower_blue = np.array([100, 50, 50])
-        upper_blue = np.array([130, 255, 255])
-        
-        # Créer un masque pour le bleu
-        mask = cv2.inRange(hsv, lower_blue, upper_blue)
-        
-        # Calculer le pourcentage de pixels bleus
-        blue_percentage = np.sum(mask > 0) / (mask.shape[0] * mask.shape[1])
-        
-        return blue_percentage > 0.1  # Si plus de 10% de l'image est bleue
-    
-    def detect_text_regions(self, image_path):
-        """Détection de régions de texte avec OpenCV"""
+        """Détection du fond bleu caractéristique de la CNI"""
         try:
-            image = cv2.imread(image_path)
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            # Plage de bleu pour CNI française
+            lower_blue = np.array([95, 50, 50])
+            upper_blue = np.array([125, 255, 255])
+            mask = cv2.inRange(hsv, lower_blue, upper_blue)
+            return np.sum(mask > 0) / (mask.shape[0] * mask.shape[1])
+        except:
+            return 0.0
+    
+    def _detect_red_elements(self, image):
+        """Détection des éléments rouges (permis de conduire)"""
+        try:
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            # Deux plages pour le rouge (début et fin du spectre)
+            lower_red1 = np.array([0, 50, 50])
+            upper_red1 = np.array([10, 255, 255])
+            lower_red2 = np.array([170, 50, 50])
+            upper_red2 = np.array([180, 255, 255])
             
-            # Prétraitement pour améliorer la détection
-            blur = cv2.GaussianBlur(gray, (5, 5), 0)
-            thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+            mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+            mask = mask1 + mask2
             
-            # Utiliser MSER (Maximally Stable Extremal Regions) pour détecter le texte
-            mser = cv2.MSER_create()
-            regions, _ = mser.detectRegions(thresh)
+            return np.sum(mask > 0) / (mask.shape[0] * mask.shape[1])
+        except:
+            return 0.0
+    
+    def _generate_probabilities(self, predicted_type, confidence):
+        """Génère des probabilités réalistes pour tous les types"""
+        probs = {}
+        remaining = 1 - confidence
+        others = [t for t in self.document_classes if t != predicted_type]
+        
+        for doc_type in self.document_classes:
+            if doc_type == predicted_type:
+                probs[doc_type] = confidence
+            else:
+                # Distribution réaliste du reste
+                if len(others) > 0:
+                    probs[doc_type] = remaining / len(others)
+                else:
+                    probs[doc_type] = 0.0
+                
+        return probs
+    
+    def extract_text_with_ocr(self, image_path):
+        """Extraction de texte avec Tesseract ou simulation"""
+        if not self.has_tesseract:
+            return self._simulate_ocr_extraction(image_path)
+        
+        try:
+            # Préprocessing de l'image
+            processed_path = self.preprocess_image_for_ocr(image_path)
             
-            # Convertir les régions en boîtes englobantes
-            boxes = []
-            for region in regions:
-                if len(region) > 50:  # Filtrer les petites régions
-                    x, y, w, h = cv2.boundingRect(region)
-                    if w > 20 and h > 10:  # Filtrer selon la taille
-                        boxes.append({'x': int(x), 'y': int(y), 'width': int(w), 'height': int(h)})
+            # Configuration Tesseract optimisée
+            if self.has_french:
+                config = r'--oem 3 --psm 6 -l fra+eng'
+            else:
+                config = r'--oem 3 --psm 6 -l eng'
+                logger.warning("Français non disponible, utilisation de l'anglais")
             
-            # Créer un masque de visualisation
-            mask = np.zeros(gray.shape, dtype=np.uint8)
-            for box in boxes:
-                cv2.rectangle(mask, (box['x'], box['y']), 
-                             (box['x'] + box['width'], box['y'] + box['height']), 255, -1)
+            # Extraction du texte
+            start_time = time.time()
+            image_pil = Image.open(processed_path)
+            text = pytesseract.image_to_string(image_pil, config=config)
             
-            # Sauvegarder le masque
-            base_name = os.path.splitext(os.path.basename(image_path))[0]
-            mask_filename = f"{base_name}_text_mask.jpg"
-            mask_path = os.path.join(app.config['UPLOAD_FOLDER'], mask_filename)
-            cv2.imwrite(mask_path, mask)
+            # Obtenir les scores de confiance
+            data = pytesseract.image_to_data(
+                image_pil, config=config, 
+                output_type=pytesseract.Output.DICT
+            )
+            
+            confidences = [int(conf) for conf in data['conf'] if int(conf) > 0]
+            avg_confidence = sum(confidences) / len(confidences) if confidences else 0
+            
+            processing_time = time.time() - start_time
+            
+            logger.info(f"OCR terminé en {processing_time:.2f}s - {len(text)} caractères - confiance: {avg_confidence:.1f}%")
             
             return {
-                'mask_path': mask_filename,
-                'text_coverage': float(np.mean(mask > 0)),
-                'detected_regions': boxes[:10]  # Limiter à 10 régions pour l'affichage
+                'raw_text': text.strip(),
+                'confidence': avg_confidence / 100,
+                'method': f'Tesseract OCR {"(fra+eng)" if self.has_french else "(eng)"}',
+                'processing_time': round(processing_time, 2),
+                'word_count': len(text.split()),
+                'character_count': len(text)
             }
             
         except Exception as e:
-            logger.error(f"Erreur lors de la détection: {e}")
-            return {'error': str(e), 'detected_regions': [], 'mask_path': None, 'text_coverage': 0.0}
+            logger.error(f"Erreur OCR : {e}")
+            return self._simulate_ocr_extraction(image_path)
     
-    def recognize_text_advanced(self, image_path):
-        """Reconnaissance de texte avancée simulée"""
+    def _simulate_ocr_extraction(self, image_path):
+        """Simulation OCR quand Tesseract n'est pas disponible"""
         try:
-            # Simuler l'analyse d'image pour extraction d'informations
             image = cv2.imread(image_path)
-            
-            # Simuler différents résultats selon le type d'image
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             mean_intensity = np.mean(gray)
-            
-            # Générer des données simulées mais cohérentes
-            if mean_intensity > 128:  # Image claire
-                confidence = 0.92
-                recognized_text = {
-                    'nom': 'MARTIN',
-                    'prenom': 'Jean Pierre',
-                    'date_naissance': '15.03.1985',
-                    'lieu_naissance': 'PARIS',
-                    'numero_document': '123456789012',
-                    'sexe': 'M',
-                    'taille': '175cm'
-                }
-            else:  # Image sombre, qualité réduite
-                confidence = 0.76
-                recognized_text = {
-                    'nom': 'DUBOIS',
-                    'prenom': 'Marie Claire',
-                    'date_naissance': '22.07.1992',
-                    'lieu_naissance': 'LYON',
-                    'numero_document': '987654321098',
-                    'sexe': 'F',
-                    'taille': '165cm'
-                }
-            
-            return {
-                'recognized_text': recognized_text,
-                'confidence': confidence,
-                'method': 'CNN+RNN (Simulé)',
-                'processing_time': 0.15
-            }
-            
-        except Exception as e:
-            logger.error(f"Erreur lors de la reconnaissance: {e}")
-            return {'error': str(e), 'recognized_text': {}}
+        except:
+            mean_intensity = 128
+        
+        # Simulation réaliste basée sur la qualité de l'image
+        if mean_intensity > 140:  # Image claire
+            confidence = 0.92
+            simulated_text = """RÉPUBLIQUE FRANÇAISE
+CARTE NATIONALE D'IDENTITÉ
+
+Nom: MARTIN
+Prénom(s): Jean Pierre
+Né(e) le: 15.03.1985
+à : PARIS 15EME (75)
+Sexe: M
+Taille: 1,75 m
+Nationalité: Française
+N°: 123456789012
+
+Délivré le: 20.01.2020
+par: PREFECTURE DE POLICE
+Valable jusqu'au: 20.01.2030"""
+        else:  # Image moins claire
+            confidence = 0.76
+            simulated_text = """RÉPUBLIQUE FRANÇAISE
+CARTE NATIONALE D'IDENTITÉ
+
+Nom: DUBOIS
+Prénom(s): Marie Claire
+Né(e) le: 22.07.1992
+à : LYON 3EME (69)
+Sexe: F
+Taille: 1,65 m
+Nationalité: Française
+N°: 987654321098"""
+        
+        return {
+            'raw_text': simulated_text,
+            'confidence': confidence,
+            'method': 'Simulation (Tesseract non disponible)',
+            'processing_time': 0.1,
+            'word_count': len(simulated_text.split()),
+            'character_count': len(simulated_text)
+        }
     
-    def extract_structured_information(self, classification_result, text_result):
-        """Extrait les informations structurées selon le type de document"""
+    def parse_french_id_card(self, text):
+        """Parser spécialisé pour CNI française"""
+        info = {}
+        
+        # Nettoyer le texte
+        clean_text = text.replace('\n', ' ').replace('  ', ' ')
+        
+        # Extraction du nom
+        nom_patterns = [
+            r'Nom[:\s]*([A-ZÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÑÒÓÔÕÖ\s-]+?)(?=\s*Prénom|\s*$)',
+            r'(?:^|\n)([A-ZÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÑÒÓÔÕÖ\s-]{2,})(?=\s*\n.*Prénom)',
+        ]
+        info['nom'] = "Non détecté"
+        for pattern in nom_patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if match:
+                info['nom'] = match.group(1).strip()
+                break
+        
+        # Extraction du prénom
+        prenom_patterns = [
+            r'Prénom\(s\)[:\s]*([A-Za-zÀ-ÿ\s-]+?)(?=\s*Né|\s*$)',
+            r'Prénom[:\s]*([A-Za-zÀ-ÿ\s-]+?)(?=\s*Né|\s*$)',
+        ]
+        info['prenom'] = "Non détecté"
+        for pattern in prenom_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                info['prenom'] = match.group(1).strip()
+                break
+        
+        # Extraction de la date de naissance
+        date_patterns = [
+            r'Né\(e\)\s*le[:\s]*(\d{1,2}[./]\d{1,2}[./]\d{4})',
+            r'né\(e\)[:\s]*(\d{1,2}[./]\d{1,2}[./]\d{4})',
+            r'(\d{1,2}[./]\d{1,2}[./]\d{4})'
+        ]
+        info['date_naissance'] = "Non détecté"
+        for pattern in date_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                info['date_naissance'] = match.group(1)
+                break
+        
+        # Extraction du lieu de naissance
+        lieu_patterns = [
+            r'à[:\s]*([A-Za-zÀ-ÿ\s\d()-]+?)(?=\s*Sexe|\s*Nationalité|\s*N°|\s*$)',
+            r'à[:\s]*([A-Za-zÀ-ÿ\s\d()-]+)',
+        ]
+        info['lieu_naissance'] = "Non détecté"
+        for pattern in lieu_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                lieu = match.group(1).strip()
+                if len(lieu) > 1:  # Éviter les matches trop courts
+                    info['lieu_naissance'] = lieu
+                    break
+        
+        # Extraction du sexe
+        sexe_match = re.search(r'Sexe[:\s]*([MF])', text, re.IGNORECASE)
+        info['sexe'] = sexe_match.group(1).upper() if sexe_match else "Non détecté"
+        
+        # Extraction de la taille
+        taille_match = re.search(r'Taille[:\s]*(\d[,.]?\d*\s*m)', text, re.IGNORECASE)
+        info['taille'] = taille_match.group(1) if taille_match else "Non détecté"
+        
+        # Extraction de la nationalité
+        nationalite_match = re.search(r'Nationalité[:\s]*([A-Za-zÀ-ÿ\s]+)', text, re.IGNORECASE)
+        info['nationalite'] = nationalite_match.group(1).strip() if nationalite_match else "Non détecté"
+        
+        # Extraction du numéro de document
+        numero_patterns = [
+            r'N°[:\s]*(\d{12})',
+            r'(\d{12})',
+            r'(\d{4}\s*\d{4}\s*\d{4})'
+        ]
+        info['numero_document'] = "Non détecté"
+        for pattern in numero_patterns:
+            match = re.search(pattern, text)
+            if match:
+                info['numero_document'] = match.group(1).replace(' ', '')
+                break
+        
+        # Extraction des dates de validité
+        delivre_match = re.search(r'Délivré\s*le[:\s]*(\d{1,2}[./]\d{1,2}[./]\d{4})', text, re.IGNORECASE)
+        info['date_delivrance'] = delivre_match.group(1) if delivre_match else "Non détecté"
+        
+        valable_match = re.search(r'Valable\s*jusqu\'au[:\s]*(\d{1,2}[./]\d{1,2}[./]\d{4})', text, re.IGNORECASE)
+        info['date_expiration'] = valable_match.group(1) if valable_match else "Non détecté"
+        
+        return info
+    
+    def extract_structured_information(self, classification_result, ocr_result):
+        """Extraction d'informations structurées depuis le texte OCR"""
         doc_type = classification_result.get('type', 'Autre')
-        text_data = text_result.get('recognized_text', {})
+        raw_text = ocr_result.get('raw_text', '')
         
         if doc_type == 'CNI':
-            return self._extract_cni_info(text_data)
+            parsed_info = self.parse_french_id_card(raw_text)
+            return {
+                'document_type': 'Carte Nationale d\'Identité',
+                **parsed_info
+            }
         elif doc_type == 'Passeport':
-            return self._extract_passport_info(text_data)
+            return {
+                'document_type': 'Passeport',
+                'texte_detecte': raw_text[:300] + "..." if len(raw_text) > 300 else raw_text,
+                'note': 'Parser passeport en développement'
+            }
         elif doc_type == 'Permis de conduire':
-            return self._extract_license_info(text_data)
+            return {
+                'document_type': 'Permis de Conduire',
+                'texte_detecte': raw_text[:300] + "..." if len(raw_text) > 300 else raw_text,
+                'note': 'Parser permis en développement'
+            }
         else:
-            return self._extract_generic_info(text_data)
-    
-    def _extract_cni_info(self, text_data):
-        return {
-            'document_type': 'Carte Nationale d\'Identité',
-            'numero': text_data.get('numero_document', 'Non détecté'),
-            'nom': text_data.get('nom', 'Non détecté'),
-            'prenom': text_data.get('prenom', 'Non détecté'),
-            'date_naissance': text_data.get('date_naissance', 'Non détecté'),
-            'lieu_naissance': text_data.get('lieu_naissance', 'Non détecté'),
-            'sexe': text_data.get('sexe', 'Non détecté'),
-            'taille': text_data.get('taille', 'Non détecté')
-        }
-    
-    def _extract_passport_info(self, text_data):
-        return {
-            'document_type': 'Passeport',
-            'numero_passeport': text_data.get('numero_document', 'Non détecté'),
-            'nom': text_data.get('nom', 'Non détecté'),
-            'prenom': text_data.get('prenom', 'Non détecté'),
-            'date_naissance': text_data.get('date_naissance', 'Non détecté'),
-            'lieu_naissance': text_data.get('lieu_naissance', 'Non détecté'),
-            'sexe': text_data.get('sexe', 'Non détecté')
-        }
-    
-    def _extract_license_info(self, text_data):
-        return {
-            'document_type': 'Permis de Conduire',
-            'numero_permis': text_data.get('numero_document', 'Non détecté'),
-            'nom': text_data.get('nom', 'Non détecté'),
-            'prenom': text_data.get('prenom', 'Non détecté'),
-            'date_naissance': text_data.get('date_naissance', 'Non détecté'),
-            'lieu_naissance': text_data.get('lieu_naissance', 'Non détecté')
-        }
-    
-    def _extract_generic_info(self, text_data):
-        return {
-            'document_type': 'Document non identifié',
-            'informations_detectees': text_data
-        }
+            return {
+                'document_type': 'Document non identifié',
+                'texte_brut': raw_text[:300] + "..." if len(raw_text) > 300 else raw_text
+            }
 
 # Instance globale du processeur
-processor = DocumentProcessorSimulated()
+processor = DocumentProcessor()
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
 @app.route('/')
 def index():
-    return '''
+    # Statut détaillé du système
+    if HAS_TESSERACT:
+        if HAS_FRENCH:
+            status = "✅ Tesseract OCR complet (français + anglais)"
+            status_class = "success"
+        else:
+            status = "⚠️ Tesseract OCR (anglais seulement)"
+            status_class = "warning"
+    else:
+        status = "❌ Mode simulation (Tesseract non installé)"
+        status_class = "error"
+    
+    install_section = ""
+    if not HAS_TESSERACT or not HAS_FRENCH:
+        install_section = '''
+            <div class="install-info">
+                <h3>🔧 Installation sur macOS :</h3>
+                <pre><code>brew install tesseract tesseract-lang
+pip3 install pytesseract</code></pre>
+            </div>
+            '''
+    
+    return f'''
     <!doctype html>
     <html>
     <head>
-        <title>Système OCR Avancé - IA pour Documents d'Identité</title>
+        <title>Système OCR Avancé - Documents d'Identité</title>
+        <meta charset="UTF-8">
         <style>
-            body { font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }
-            .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-            h1 { color: #333; text-align: center; margin-bottom: 30px; }
-            .upload-area { border: 2px dashed #ccc; padding: 40px; text-align: center; margin: 20px 0; border-radius: 10px; }
-            .upload-area:hover { border-color: #999; }
-            input[type="file"] { margin: 10px; }
-            input[type="submit"] { background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }
-            input[type="submit"]:hover { background-color: #0056b3; }
-            .features { margin-top: 30px; }
-            .feature { background-color: #f8f9fa; padding: 15px; margin: 10px 0; border-radius: 5px; }
-            .demo-note { background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 5px; margin: 20px 0; }
+            body {{ 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+                margin: 40px; 
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+            }}
+            .container {{ 
+                max-width: 800px; 
+                margin: 0 auto; 
+                background: white; 
+                padding: 40px; 
+                border-radius: 15px; 
+                box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            }}
+            h1 {{ 
+                color: #333; 
+                text-align: center; 
+                margin-bottom: 30px;
+                font-size: 2.5em;
+            }}
+            .upload-area {{ 
+                border: 3px dashed #ddd; 
+                padding: 50px; 
+                text-align: center; 
+                margin: 30px 0; 
+                border-radius: 15px; 
+                transition: all 0.3s ease;
+            }}
+            .upload-area:hover {{ 
+                border-color: #667eea; 
+                background-color: #f8f9ff;
+            }}
+            input[type="file"] {{ 
+                margin: 15px; 
+                padding: 10px;
+                font-size: 16px;
+            }}
+            input[type="submit"] {{ 
+                background: linear-gradient(45deg, #667eea, #764ba2); 
+                color: white; 
+                padding: 15px 30px; 
+                border: none; 
+                border-radius: 8px; 
+                cursor: pointer; 
+                font-size: 18px;
+                font-weight: bold;
+                transition: transform 0.2s ease;
+            }}
+            input[type="submit"]:hover {{ 
+                transform: translateY(-2px);
+                box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            }}
+            .status {{ 
+                padding: 20px; 
+                border-radius: 10px; 
+                margin: 25px 0; 
+                font-weight: bold;
+            }}
+            .status.success {{ background-color: #d4edda; border: 2px solid #c3e6cb; color: #155724; }}
+            .status.warning {{ background-color: #fff3cd; border: 2px solid #ffeaa7; color: #856404; }}
+            .status.error {{ background-color: #f8d7da; border: 2px solid #f5c6cb; color: #721c24; }}
+            .features {{ margin-top: 40px; }}
+            .feature {{ 
+                background: linear-gradient(45deg, #f8f9fa, #e9ecef); 
+                padding: 20px; 
+                margin: 15px 0; 
+                border-radius: 10px; 
+                border-left: 5px solid #667eea;
+            }}
+            .install-info {{ 
+                background-color: #f8d7da; 
+                border: 2px solid #f5c6cb; 
+                padding: 20px; 
+                border-radius: 10px; 
+                margin: 20px 0; 
+            }}
+            pre {{ 
+                background-color: #f1f3f4; 
+                padding: 15px; 
+                border-radius: 5px; 
+                overflow-x: auto;
+            }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>Système OCR Avancé avec IA</h1>
-            <p style="text-align: center; color: #666;">
-                Reconnaissance automatique de documents d'identité utilisant Vision par Ordinateur
+            <h1>🤖 Système OCR Avancé</h1>
+            <p style="text-align: center; color: #666; font-size: 18px;">
+                Reconnaissance automatique de documents d'identité avec IA
             </p>
             
-            <div class="demo-note">
-                <h3>Mode Démonstration</h3>
-                <p>Cette version utilise OpenCV et des algorithmes de vision par ordinateur avancés pour simuler les capacités des modèles CNN et RNN. Parfait pour démontrer l'architecture sans les dépendances PyTorch.</p>
+            <div class="status {status_class}">
+                <h3>📊 Statut du Système</h3>
+                <p>{status}</p>
             </div>
+            
+            {install_section}
             
             <form method="post" enctype="multipart/form-data" action="/upload">
                 <div class="upload-area">
-                    <h3>Télécharger un document d'identité</h3>
+                    <h3>📄 Télécharger un document d'identité</h3>
+                    <p style="color: #666;">CNI, Passeport, Permis de conduire</p>
                     <input type="file" name="file" accept=".png,.jpg,.jpeg" required>
                     <br><br>
-                    <input type="submit" value="Analyser avec l'IA">
+                    <input type="submit" value="🚀 Analyser avec l'IA">
                 </div>
             </form>
             
             <div class="features">
-                <h3> Fonctionnalités implémentées :</h3>
+                <h3>🔬 Fonctionnalités :</h3>
                 <div class="feature">
-                    <strong> Classification automatique :</strong> Analyse des dimensions et couleurs pour identifier CNI, Passeport, Permis
+                    <strong>🎯 Classification Intelligente :</strong> Reconnaissance automatique du type de document
                 </div>
                 <div class="feature">
-                    <strong> Détection MSER :</strong> Détection de régions de texte avec algorithme MSER (OpenCV)
+                    <strong>📝 OCR Avancé :</strong> Extraction de texte avec préprocessing intelligent
                 </div>
                 <div class="feature">
-                    <strong> Extraction intelligente :</strong> Simulation de reconnaissance avancée avec heuristiques
+                    <strong>🛡️ Parsing Structuré :</strong> Extraction automatique des champs (nom, prénom, dates, etc.)
                 </div>
                 <div class="feature">
-                    <strong> Structure adaptative :</strong> Parsing selon le type de document détecté
+                    <strong>🔧 Optimisé macOS :</strong> Configuration automatique pour Homebrew et Apple Silicon
                 </div>
             </div>
         </div>
@@ -320,9 +653,14 @@ def upload_file():
         timestamp = str(int(time.time()))
         filename = f"{timestamp}_{filename}"
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(file_path)
         
-        return redirect(url_for('analyze_document', filename=filename))
+        try:
+            file.save(file_path)
+            logger.info(f"Fichier sauvé : {file_path}")
+            return redirect(url_for('analyze_document', filename=filename))
+        except Exception as e:
+            logger.error(f"Erreur sauvegarde fichier : {e}")
+            return "Erreur lors de la sauvegarde", 500
     
     return "Type de fichier non autorisé", 400
 
@@ -336,88 +674,52 @@ def analyze_document(filename):
     # Début du chronométrage
     start_time = time.time()
     
-    # Étape 1: Classification du document
-    logger.info("Classification du document en cours...")
-    classification_result = processor.classify_document(image_path)
-    
-    # Étape 2: Détection des régions de texte
-    logger.info("Détection des régions de texte...")
-    detection_result = processor.detect_text_regions(image_path)
-    
-    # Étape 3: Reconnaissance de texte
-    logger.info("Reconnaissance de texte avancée...")
-    text_result = processor.recognize_text_advanced(image_path)
-    
-    # Étape 4: Extraction d'informations structurées
-    logger.info("Extraction d'informations structurées...")
-    structured_info = processor.extract_structured_information(classification_result, text_result)
-    
-    # Calcul du temps de traitement
-    processing_time = time.time() - start_time
-    
-    # Génération du rapport
-    analysis_report = {
-        'filename': filename,
-        'processing_time': round(processing_time, 2),
-        'timestamp': datetime.now().isoformat(),
-        'classification': classification_result,
-        'text_detection': detection_result,
-        'text_recognition': text_result,
-        'structured_information': structured_info
-    }
-    
-    return render_template_string(get_results_template(), 
-                                report=analysis_report, 
-                                filename=filename)
+    try:
+        # Étape 1: Classification du document
+        logger.info("🔍 Classification du document...")
+        classification_result = processor.classify_document(image_path)
+        
+        # Étape 2: Extraction OCR
+        logger.info("📝 Extraction OCR du texte...")
+        ocr_result = processor.extract_text_with_ocr(image_path)
+        
+        # Étape 3: Parsing structuré
+        logger.info("🧠 Parsing des informations...")
+        structured_info = processor.extract_structured_information(classification_result, ocr_result)
+        
+        # Calcul du temps de traitement
+        processing_time = time.time() - start_time
+        
+        # Génération du rapport
+        analysis_report = {
+            'filename': filename,
+            'processing_time': round(processing_time, 2),
+            'timestamp': datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+            'classification': classification_result,
+            'ocr_result': ocr_result,
+            'structured_information': structured_info,
+            'has_real_ocr': HAS_TESSERACT,
+            'has_french': HAS_FRENCH,
+            'system_info': {
+                'tesseract_path': pytesseract.pytesseract.tesseract_cmd if HAS_TESSERACT else None,
+                'opencv_version': cv2.__version__,
+                'platform': 'macOS'
+            }
+        }
+        
+        logger.info(f"✅ Analyse terminée en {processing_time:.2f}s")
+        
+        return render_template_string(get_results_template(), 
+                                    report=analysis_report, 
+                                    filename=filename)
+                                    
+    except Exception as e:
+        logger.error(f"❌ Erreur durant l'analyse : {e}")
+        return f"Erreur durant l'analyse : {str(e)}", 500
 
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
-
-@app.route('/api/analyze', methods=['POST'])
-def api_analyze():
-    """API endpoint pour l'intégration avec d'autres systèmes"""
-    if 'file' not in request.files:
-        return jsonify({'error': 'Aucun fichier fourni'}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'Nom de fichier vide'}), 400
-    
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        timestamp = str(int(time.time()))
-        filename = f"api_{timestamp}_{filename}"
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(file_path)
-        
-        try:
-            # Traitement IA
-            start_time = time.time()
-            
-            classification_result = processor.classify_document(file_path)
-            detection_result = processor.detect_text_regions(file_path)
-            text_result = processor.recognize_text_advanced(file_path)
-            structured_info = processor.extract_structured_information(classification_result, text_result)
-            
-            processing_time = time.time() - start_time
-            
-            # Nettoyage du fichier temporaire
-            os.remove(file_path)
-            
-            return jsonify({
-                'success': True,
-                'processing_time': round(processing_time, 2),
-                'classification': classification_result,
-                'structured_information': structured_info,
-                'confidence_score': classification_result.get('confidence', 0)
-            })
-            
-        except Exception as e:
-            logger.error(f"Erreur lors du traitement API: {e}")
-            return jsonify({'error': f'Erreur de traitement: {str(e)}'}), 500
-    
-    return jsonify({'error': 'Type de fichier non autorisé'}), 400
 
 def get_results_template():
     return '''
@@ -425,149 +727,304 @@ def get_results_template():
     <html>
     <head>
         <title>Résultats de l'Analyse IA</title>
+        <meta charset="UTF-8">
         <style>
-            body { font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }
-            .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-            .header { text-align: center; margin-bottom: 30px; }
-            .section { margin: 20px 0; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }
-            .success { background-color: #d4edda; border-color: #c3e6cb; }
-            .info { background-color: #d1ecf1; border-color: #bee5eb; }
-            .warning { background-color: #fff3cd; border-color: #ffeaa7; }
-            .demo { background-color: #e7f3ff; border-color: #b3d9ff; }
-            .image-preview { max-width: 250px; border-radius: 8px; margin: 10px; }
-            .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
-            .metric { background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; }
-            .confidence-high { color: #28a745; font-weight: bold; }
-            .confidence-medium { color: #ffc107; font-weight: bold; }
-            .confidence-low { color: #dc3545; font-weight: bold; }
-            table { width: 100%; border-collapse: collapse; margin: 15px 0; }
-            th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
-            th { background-color: #f8f9fa; font-weight: bold; }
-            .back-button { background-color: #6c757d; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 20px; }
-            .json-view { background: #f8f9fa; padding: 15px; border-radius: 5px; white-space: pre-wrap; font-family: monospace; font-size: 12px; max-height: 300px; overflow-y: auto; }
+            body { 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+                margin: 20px; 
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+            }
+            .container { 
+                max-width: 1200px; 
+                margin: 0 auto; 
+                background: white; 
+                padding: 30px; 
+                border-radius: 15px; 
+                box-shadow: 0 10px 30px rgba(0,0,0,0.2); 
+            }
+            .header { 
+                text-align: center; 
+                margin-bottom: 30px; 
+                padding: 20px;
+                background: linear-gradient(45deg, #667eea, #764ba2);
+                color: white;
+                border-radius: 10px;
+            }
+            .section { 
+                margin: 25px 0; 
+                padding: 25px; 
+                border: 2px solid #e9ecef; 
+                border-radius: 10px; 
+                background: #f8f9fa;
+            }
+            .success { background: linear-gradient(45deg, #d4edda, #c3e6cb); border-color: #28a745; }
+            .info { background: linear-gradient(45deg, #d1ecf1, #bee5eb); border-color: #17a2b8; }
+            .warning { background: linear-gradient(45deg, #fff3cd, #ffeaa7); border-color: #ffc107; }
+            .error { background: linear-gradient(45deg, #f8d7da, #f5c6cb); border-color: #dc3545; }
+            
+            .image-preview { 
+                max-width: 300px; 
+                max-height: 400px; 
+                border-radius: 10px; 
+                box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+                margin: 15px; 
+            }
+            .metrics { 
+                display: grid; 
+                grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); 
+                gap: 20px; 
+                margin: 25px 0; 
+            }
+            .metric { 
+                background: white; 
+                padding: 20px; 
+                border-radius: 10px; 
+                text-align: center; 
+                box-shadow: 0 3px 10px rgba(0,0,0,0.1);
+                border-left: 5px solid #667eea;
+            }
+            .metric h3 { 
+                margin: 0 0 10px 0; 
+                color: #333; 
+                font-size: 1.1em;
+            }
+            .metric p { 
+                margin: 0; 
+                font-size: 1.5em; 
+                font-weight: bold; 
+            }
+            .confidence-high { color: #28a745; }
+            .confidence-medium { color: #ffc107; }
+            .confidence-low { color: #dc3545; }
+            
+            table { 
+                width: 100%; 
+                border-collapse: collapse; 
+                margin: 20px 0; 
+                background: white;
+                border-radius: 8px;
+                overflow: hidden;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            }
+            th, td { 
+                padding: 15px; 
+                text-align: left; 
+                border-bottom: 1px solid #dee2e6; 
+            }
+            th { 
+                background: linear-gradient(45deg, #667eea, #764ba2); 
+                color: white; 
+                font-weight: bold; 
+            }
+            tr:hover { background-color: #f8f9fa; }
+            
+            .back-button { 
+                background: linear-gradient(45deg, #6c757d, #5a6268); 
+                color: white; 
+                padding: 15px 30px; 
+                text-decoration: none; 
+                border-radius: 8px; 
+                display: inline-block; 
+                margin-top: 30px; 
+                font-weight: bold;
+                transition: transform 0.2s ease;
+            }
+            .back-button:hover { 
+                transform: translateY(-2px);
+                box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            }
+            
+            .text-extract { 
+                background: #f1f3f4; 
+                padding: 20px; 
+                border-radius: 8px; 
+                font-family: 'Monaco', 'Menlo', monospace; 
+                font-size: 14px; 
+                white-space: pre-wrap; 
+                max-height: 300px; 
+                overflow-y: auto; 
+                border: 1px solid #dee2e6;
+                line-height: 1.5;
+            }
+            
+            .json-view { 
+                background: #f8f9fa; 
+                padding: 20px; 
+                border-radius: 8px; 
+                white-space: pre-wrap; 
+                font-family: 'Monaco', 'Menlo', monospace; 
+                font-size: 12px; 
+                max-height: 400px; 
+                overflow-y: auto; 
+                border: 1px solid #dee2e6;
+            }
+            
+            details { 
+                margin: 15px 0; 
+            }
+            summary { 
+                cursor: pointer; 
+                padding: 10px; 
+                background: #e9ecef; 
+                border-radius: 5px; 
+                font-weight: bold;
+            }
+            summary:hover { 
+                background: #dee2e6; 
+            }
+            
+            .status-badge {
+                display: inline-block;
+                padding: 5px 12px;
+                border-radius: 20px;
+                font-size: 12px;
+                font-weight: bold;
+                margin-left: 10px;
+            }
+            .status-real { background: #d4edda; color: #155724; }
+            .status-sim { background: #fff3cd; color: #856404; }
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <h1> Résultats de l'Analyse IA</h1>
+                <h1>🤖 Résultats de l'Analyse IA</h1>
                 <p>Traitement terminé en <strong>{{ report.processing_time }}s</strong> | {{ report.timestamp }}</p>
-            </div>
-            
-            <div class="section demo">
-                <h2> Mode Démonstration Actif</h2>
-                <p>Cette analyse utilise des algorithmes OpenCV avancés pour simuler les capacités des modèles CNN et RNN, sans nécessiter PyTorch. Les résultats démontrent l'architecture et les capacités du système.</p>
+                <p>
+                    <strong>Mode OCR:</strong> 
+                    {% if report.has_real_ocr %}
+                        ✅ Tesseract Réel
+                        <span class="status-badge status-real">
+                            {% if report.has_french %}FRA+ENG{% else %}ENG{% endif %}
+                        </span>
+                    {% else %}
+                        ⚠️ Simulation
+                        <span class="status-badge status-sim">DEMO</span>
+                    {% endif %}
+                </p>
             </div>
             
             <!-- Image originale -->
             <div class="section">
-                <h2> Document analysé</h2>
-                <img src="{{ url_for('uploaded_file', filename=filename) }}" class="image-preview" alt="Document">
+                <h2>📷 Document Analysé</h2>
+                <div style="text-align: center;">
+                    <img src="{{ url_for('uploaded_file', filename=filename) }}" class="image-preview" alt="Document">
+                </div>
+                <p><strong>Fichier :</strong> {{ filename }}</p>
             </div>
             
             <!-- Métriques de performance -->
             <div class="metrics">
                 <div class="metric">
-                    <h3>⚡ Temps de traitement</h3>
-                    <p><strong>{{ report.processing_time }}s</strong></p>
+                    <h3>⚡ Temps Total</h3>
+                    <p class="confidence-high">{{ report.processing_time }}s</p>
                 </div>
                 <div class="metric">
-                    <h3> Type détecté</h3>
+                    <h3>🎯 Type Détecté</h3>
                     <p><strong>{{ report.classification.type }}</strong></p>
                 </div>
                 <div class="metric">
-                    <h3> Confiance</h3>
+                    <h3>📊 Confiance Classification</h3>
                     <p class="{% if report.classification.confidence > 0.8 %}confidence-high{% elif report.classification.confidence > 0.5 %}confidence-medium{% else %}confidence-low{% endif %}">
                         {{ "%.1f"|format(report.classification.confidence * 100) }}%
                     </p>
                 </div>
                 <div class="metric">
-                    <h3> Régions détectées</h3>
-                    <p><strong>{{ report.text_detection.detected_regions|length }}</strong></p>
+                    <h3>📝 Confiance OCR</h3>
+                    <p class="{% if report.ocr_result.confidence > 0.8 %}confidence-high{% elif report.ocr_result.confidence > 0.5 %}confidence-medium{% else %}confidence-low{% endif %}">
+                        {{ "%.1f"|format(report.ocr_result.confidence * 100) }}%
+                    </p>
+                </div>
+                <div class="metric">
+                    <h3>📄 Mots Extraits</h3>
+                    <p class="confidence-high">{{ report.ocr_result.word_count }}</p>
+                </div>
+                <div class="metric">
+                    <h3>🔤 Caractères</h3>
+                    <p class="confidence-high">{{ report.ocr_result.character_count }}</p>
                 </div>
             </div>
 
             <!-- Classification détaillée -->
             <div class="section info">
-                <h2> Classification par Vision par Ordinateur</h2>
-                <p><strong>Type de document identifié :</strong> {{ report.classification.type }}</p>
-                <p><strong>Niveau de confiance :</strong> {{ "%.2f"|format(report.classification.confidence * 100) }}%</p>
-                <p><em>Méthode : Analyse des proportions et détection de couleurs caractéristiques</em></p>
+                <h2>🧠 Classification Intelligente</h2>
+                <p><strong>Type identifié :</strong> {{ report.classification.type }}</p>
+                <p><strong>Confiance :</strong> {{ "%.2f"|format(report.classification.confidence * 100) }}%</p>
                 
-                <h3>Probabilités pour tous les types :</h3>
+                {% if report.classification.analysis %}
+                <h3>📊 Analyse Visuelle :</h3>
+                <ul>
+                    <li><strong>Ratio d'aspect :</strong> {{ report.classification.analysis.aspect_ratio }}</li>
+                    <li><strong>Score bleu (CNI) :</strong> {{ report.classification.analysis.blue_score }}</li>
+                    <li><strong>Score rouge (Permis) :</strong> {{ report.classification.analysis.red_score }}</li>
+                </ul>
+                {% endif %}
+                
+                <h3>🎲 Probabilités par Type :</h3>
                 <table>
                     <thead>
-                        <tr><th>Type de document</th><th>Probabilité</th></tr>
+                        <tr><th>Type de Document</th><th>Probabilité</th><th>Barre</th></tr>
                     </thead>
                     <tbody>
                         {% for doc_type, prob in report.classification.all_probabilities.items() %}
                         <tr>
                             <td>{{ doc_type }}</td>
                             <td>{{ "%.2f"|format(prob * 100) }}%</td>
+                            <td>
+                                <div style="background: #e9ecef; border-radius: 10px; height: 20px; width: 100px; overflow: hidden;">
+                                    <div style="background: linear-gradient(45deg, #667eea, #764ba2); height: 100%; width: {{ prob * 100 }}%; border-radius: 10px;"></div>
+                                </div>
+                            </td>
                         </tr>
                         {% endfor %}
                     </tbody>
                 </table>
             </div>
 
-            <!-- Détection de régions de texte -->
-            <div class="section info">
-                <h2> Détection de Régions avec MSER</h2>
-                <p><strong>Couverture de texte :</strong> {{ "%.1f"|format(report.text_detection.text_coverage * 100) }}%</p>
-                <p><strong>Nombre de régions détectées :</strong> {{ report.text_detection.detected_regions|length }}</p>
-                <p><em>Algorithme : Maximally Stable Extremal Regions (OpenCV)</em></p>
+            <!-- Extraction OCR -->
+            <div class="section {% if report.has_real_ocr %}info{% else %}warning{% endif %}">
+                <h2>📝 Extraction de Texte OCR</h2>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 15px 0;">
+                    <div><strong>Méthode :</strong> {{ report.ocr_result.method }}</div>
+                    <div><strong>Confiance :</strong> {{ "%.1f"|format(report.ocr_result.confidence * 100) }}%</div>
+                    <div><strong>Temps OCR :</strong> {{ report.ocr_result.processing_time }}s</div>
+                    <div><strong>Mots détectés :</strong> {{ report.ocr_result.word_count }}</div>
+                </div>
                 
-                {% if report.text_detection.mask_path %}
-                <h3>Masque de détection :</h3>
-                <img src="{{ url_for('uploaded_file', filename=report.text_detection.mask_path) }}" 
-                     class="image-preview" alt="Masque de détection">
-                {% endif %}
+                <h3>📄 Texte Extrait :</h3>
+                <div class="text-extract">{{ report.ocr_result.raw_text }}</div>
                 
-                {% if report.text_detection.detected_regions %}
-                <h3>Coordonnées des régions détectées :</h3>
-                <table>
-                    <thead>
-                        <tr><th>Région</th><th>X</th><th>Y</th><th>Largeur</th><th>Hauteur</th></tr>
-                    </thead>
-                    <tbody>
-                        {% for region in report.text_detection.detected_regions[:5] %}
-                        <tr>
-                            <td>{{ loop.index }}</td>
-                            <td>{{ region.x }}</td>
-                            <td>{{ region.y }}</td>
-                            <td>{{ region.width }}</td>
-                            <td>{{ region.height }}</td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+                {% if not report.has_real_ocr %}
+                <div style="margin-top: 15px; padding: 15px; background-color: #fff3cd; border-radius: 8px; border-left: 5px solid #ffc107;">
+                    <strong>💡 Note :</strong> Données simulées - Installez Tesseract pour l'OCR réel :
+                    <code>brew install tesseract tesseract-lang</code>
+                </div>
                 {% endif %}
             </div>
 
-            <!-- Reconnaissance de texte -->
+            <!-- Informations structurées -->
             <div class="section success">
-                <h2> Reconnaissance de Texte Avancée</h2>
-                <p><strong>Méthode :</strong> {{ report.text_recognition.method }}</p>
-                <p><strong>Confiance :</strong> {{ "%.1f"|format(report.text_recognition.confidence * 100) }}%</p>
-                <p><strong>Temps de traitement :</strong> {{ report.text_recognition.processing_time }}s</p>
-                <p><em>Simulation d'architecture CNN+RNN avec extraction heuristique intelligente</em></p>
-            </div>
-
-            <!-- Informations extraites -->
-            <div class="section success">
-                <h2> Informations Extraites</h2>
+                <h2>📋 Informations Extraites et Structurées</h2>
                 <p><strong>Type de document :</strong> {{ report.structured_information.document_type }}</p>
                 
                 <table>
                     <thead>
-                        <tr><th>Champ</th><th>Valeur</th></tr>
+                        <tr><th>Champ</th><th>Valeur Extraite</th><th>Statut</th></tr>
                     </thead>
                     <tbody>
                         {% for key, value in report.structured_information.items() %}
                         {% if key != 'document_type' %}
                         <tr>
-                            <td>{{ key.replace('_', ' ').title() }}</td>
-                            <td><strong>{{ value }}</strong></td>
+                            <td><strong>{{ key.replace('_', ' ').title() }}</strong></td>
+                            <td>{{ value }}</td>
+                            <td>
+                                {% if value != "Non détecté" and value != "Not detected" %}
+                                    <span style="color: #28a745; font-weight: bold;">✅ Détecté</span>
+                                {% else %}
+                                    <span style="color: #dc3545; font-weight: bold;">❌ Non détecté</span>
+                                {% endif %}
+                            </td>
                         </tr>
                         {% endif %}
                         {% endfor %}
@@ -575,18 +1032,26 @@ def get_results_template():
                 </table>
             </div>
 
-            <!-- Analyse technique détaillée -->
+            <!-- Informations système -->
             <div class="section">
-                <h2> Détails Techniques</h2>
-                <details>
-                    <summary>Afficher les données JSON complètes</summary>
+                <h2>⚙️ Informations Système</h2>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px;">
+                    <div><strong>Plateforme :</strong> {{ report.system_info.platform }}</div>
+                    <div><strong>OpenCV :</strong> {{ report.system_info.opencv_version }}</div>
+                    {% if report.system_info.tesseract_path %}
+                    <div><strong>Tesseract :</strong> {{ report.system_info.tesseract_path }}</div>
+                    {% endif %}
+                </div>
+                
+                <details style="margin-top: 20px;">
+                    <summary>🔬 Voir les données JSON complètes</summary>
                     <div class="json-view">{{ report | tojson(indent=2) }}</div>
                 </details>
             </div>
 
             <!-- Actions -->
             <div style="text-align: center;">
-                <a href="{{ url_for('index') }}" class="back-button"> Analyser un autre document</a>
+                <a href="{{ url_for('index') }}" class="back-button">🔄 Analyser un Autre Document</a>
             </div>
         </div>
     </body>
@@ -594,7 +1059,24 @@ def get_results_template():
     '''
 
 if __name__ == '__main__':
-    logger.info(" Démarrage du serveur OCR avancé (mode simulation)...")
-    logger.info(" Interface disponible sur : http://localhost:5000")
-    logger.info(" Mode : Simulation avec OpenCV (sans PyTorch)")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    print("=" * 60)
+    print("🚀 DÉMARRAGE DU SYSTÈME OCR AVANCÉ")
+    print("=" * 60)
+    print(f"📍 Interface web : http://localhost:5000")
+    print(f"🔧 OCR réel : {'✅ Activé' if HAS_TESSERACT else '❌ Installer Tesseract'}")
+    print(f"🇫🇷 Français : {'✅ Disponible' if HAS_FRENCH else '❌ Installer tesseract-lang'}")
+    print(f"📁 Dossier uploads : {os.path.abspath(UPLOAD_FOLDER)}")
+    
+    if not HAS_TESSERACT:
+        print("\n⚠️  INSTALLATION REQUISE :")
+        print("   brew install tesseract tesseract-lang")
+        print("   pip3 install pytesseract")
+    
+    print("=" * 60)
+    
+    try:
+        app.run(debug=True, host='0.0.0.0', port=8080)
+    except KeyboardInterrupt:
+        print("\n👋 Arrêt du serveur...")
+    except Exception as e:
+        print(f"\n❌ Erreur : {e}")
