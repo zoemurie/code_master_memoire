@@ -954,9 +954,6 @@ def get_results_template():
                 <div class="text-extract">{{ report.ocr_result.raw_text }}</div>
                 
                 {% if report.has_real_ocr %}
-                <div style="margin-top: 15px; padding: 15px; background-color: #d4edda; border-radius: 8px; border-left: 5px solid #28a745;">
-                    <strong>Now uses the optimized extraction method from old_code.py for better results!</strong>
-                </div>
                 {% else %}
                 <div style="margin-top: 15px; padding: 15px; background-color: #fff3cd; border-radius: 8px; border-left: 5px solid #ffc107;">
                     <strong>Note:</strong> Simulated data - Install Tesseract for real OCR:
