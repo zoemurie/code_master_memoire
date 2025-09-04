@@ -142,59 +142,362 @@ def extract_info_with_confidence(image_path):
     
     return text, average_confidence, is_confident 
 
-def extract_info_basic(text): 
-    """Basic information extraction - old_code.py version"""
-    # Normalize spaces and parasitic characters 
-    text = text.replace('|', ' ').replace('Ne:', ' ').replace('$', ' ') 
+def extract_info_basic_improved(text): 
+    """
+    Information extraction improved for new French ID cards
+    Adapted for fields actually present on new cards
+    """
+    # Normalize text and split into lines
+    text = text.replace('|', ' ').replace('Ne:', ' ').replace('$', ' ')
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
     
-    # Extract card number (12 digits) 
-    identity_number_match = re.search(r'\b\d{12}\b', text) 
-    if identity_number_match: 
-        identity_number = identity_number_match.group(0) 
-    else: 
-        all_digits = re.findall(r'\d', text) 
-        identity_number = ''.join(all_digits)[:12].ljust(12, '?') 
+    # Join all lines into single text for certain searches
+    full_text = ' '.join(lines)
     
-    # Extract date of birth (xx.xx.xxxx) 
-    dob_match = re.search(r'(\d{2}\.\d{2}\.\d{4})', text) 
-    if dob_match: 
-        date_of_birth = dob_match.group(1) 
-    else: 
-        # Get all digits from text 
-        all_digits = re.findall(r'\d', text) 
-        if len(all_digits) >= 8: 
-            date_of_birth = f"{''.join(all_digits[:2])}.{''.join(all_digits[2:4])}.{''.join(all_digits[4:8])}" 
-        else: 
-            date_of_birth = "??.??.????" 
+    logger.info(f"=== EXTRACTION DEBUG (New French ID) ===")
+    logger.info(f"Lines detected: {len(lines)}")
+    for i, line in enumerate(lines):
+        logger.info(f"Line {i}: '{line}'")
     
-    # Other information 
-    surname = re.search(r'Nom\s*:\s*(\S+)', text) 
-    name = re.search(r'Prénom\(s\)\s*:\s*(.+)', text) 
-    sex = re.search(r'Sexe\s*:\s*(\S+)', text) 
-    pob = re.search(r'à\s*([A-Za-zÀ-ÿ\s-]+)', text) 
-    height = re.search(r'Taille\s*:\s*(\S+)', text) 
+    # 1. DOCUMENT NUMBER - Exactly 9 characters (digits and letters)
+    identity_number = None
     
+    # New French ID cards have exactly 9 characters
+    # Pattern: mix of letters and digits, exactly 9 characters
+    nine_char_patterns = [
+        r'\b([A-Z0-9]{9})\b',  # 9 alphanumeric characters
+        r'\b([A-Z]\d{2}[A-Z]\d{2}[A-Z]{2}\d)\b',  # T7X62TZ79 format
+        r'\b([A-Z]{1,3}\d{1,6}[A-Z]{1,3})\b'  # Flexible letter/digit mix
+    ]
+    
+    for pattern in nine_char_patterns:
+        matches = re.findall(pattern, full_text)
+        for match in matches:
+            # Verify it's exactly 9 characters and contains both letters and digits
+            if len(match) == 9 and re.search(r'[A-Z]', match) and re.search(r'\d', match):
+                identity_number = match
+                logger.info(f"9-character document number found: {identity_number}")
+                break
+        if identity_number:
+            break
+    
+    # Fallback: search for 9-character sequences with possible spaces
+    if not identity_number:
+        spaced_match = re.search(r'([A-Z0-9]\s*[A-Z0-9]\s*[A-Z0-9]\s*[A-Z0-9]\s*[A-Z0-9]\s*[A-Z0-9]\s*[A-Z0-9]\s*[A-Z0-9]\s*[A-Z0-9])', full_text)
+        if spaced_match:
+            candidate = spaced_match.group(1).replace(' ', '')
+            if len(candidate) == 9 and re.search(r'[A-Z]', candidate) and re.search(r'\d', candidate):
+                identity_number = candidate
+                logger.info(f"9-character number found with spaces: {identity_number}")
+    
+    # 2. SURNAME
+    surname = None
+    for i, line in enumerate(lines):
+        if 'NOM' in line.upper() and ('SURNAME' in line.upper() or '/' in line):
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if next_line and len(next_line) > 2:
+                    surname = next_line
+                    logger.info(f"Surname found: '{surname}'")
+                    break
+    
+    # Fallback: search for capitalized words that look like surnames
+    if not surname:
+        for line in lines:
+            line_clean = line.strip().upper()
+            if re.match(r'^[A-Z]{4,}$', line_clean):
+                excluded_keywords = ['CARTE', 'NATIONALE', 'IDENTITE', 'IDENTITY', 'CARD', 'SEXE', 'DATE', 'LIEU', 'PLACE']
+                if line_clean not in excluded_keywords:
+                    surname = line_clean
+                    logger.info(f"Surname found by pattern: '{surname}'")
+                    break
+    
+    # 3. FIRST NAMES
+    first_names = None
+    for i, line in enumerate(lines):
+        if 'PRENOMS' in line.upper() or 'GIVEN NAMES' in line.upper():
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if next_line and ',' in next_line:
+                    first_names = next_line
+                    logger.info(f"First names found after label: '{first_names}'")
+                    break
+    
+    # Fallback: search for lines with comma-separated names
+    if not first_names:
+        for line in lines:
+            if ',' in line and re.match(r'^[A-Za-zàâäéèêëïîôöùûüÿç\s,]+$', line.strip()):
+                parts = [part.strip() for part in line.split(',')]
+                if len(parts) >= 2 and all(len(part) >= 2 for part in parts):
+                    first_names = line.strip()
+                    logger.info(f"First names found by pattern: '{first_names}'")
+                    break
+    
+    # 4. SEX - Improved detection
+    sex = None
+    
+    # Method 1: Search in lines containing SEXE
+    for line in lines:
+        if 'SEXE' in line.upper() or 'SEX' in line.upper():
+            sex_match = re.search(r'\b([FM])\b', line.upper())
+            if sex_match:
+                sex = sex_match.group(1)
+                logger.info(f"Sex found in SEXE line: '{sex}'")
+                break
+            
+            # If not found on same line, check following lines
+            line_index = lines.index(line)
+            for j in range(line_index + 1, min(line_index + 3, len(lines))):
+                next_line = lines[j].upper().strip()
+                if next_line in ['F', 'M']:
+                    sex = next_line
+                    logger.info(f"Sex found in following line: '{sex}'")
+                    break
+            if sex:
+                break
+    
+    # Method 2: Search for isolated F or M near personal info
+    if not sex:
+        for i, line in enumerate(lines):
+            if line.strip().upper() in ['F', 'M']:
+                # Check if we're in personal info context
+                context = ' '.join(lines[max(0, i-2):min(len(lines), i+3)]).upper()
+                context_keywords = ['DATE', 'NAISS', 'BIRTH', 'FRA', 'SEXE']
+                if any(keyword in context for keyword in context_keywords):
+                    sex = line.strip().upper()
+                    logger.info(f"Sex found by context: '{sex}'")
+                    break
+    
+    # 5. NATIONALITY
+    nationality = None
+    nat_match = re.search(r'\b(FRA|FRANÇAISE?|FRENCH)\b', full_text.upper())
+    if nat_match:
+        nationality = nat_match.group(1)
+        logger.info(f"Nationality: '{nationality}'")
+    
+    # 6. DATE OF BIRTH - Search for 8 digits (possibly with spaces)
+    date_of_birth = None
+    
+    # Search for exactly 8 digits (with possible spaces) for birth date
+    birth_date_patterns = [
+        r'\b(\d{2})\s*(\d{2})\s*(\d{4})\b',  # DD MM YYYY with spaces
+        r'\b(\d{4})\s*(\d{2})\s*(\d{2})\b',  # YYYY MM DD with spaces
+        r'(\d\s*\d\s*\d\s*\d\s*\d\s*\d\s*\d\s*\d)',  # 8 digits with any spacing
+    ]
+    
+    birth_candidates = []
+    for pattern in birth_date_patterns:
+        matches = re.finditer(pattern, full_text)
+        for match in matches:
+            if len(match.groups()) >= 2:  # For DD MM YYYY or YYYY MM DD patterns
+                groups = match.groups()
+                if len(groups) == 3:
+                    # Handle DD MM YYYY format
+                    day, month, year = int(groups[0]), int(groups[1]), int(groups[2])
+                    if 1 <= day <= 31 and 1 <= month <= 12 and 1950 <= year <= 2010:
+                        formatted_date = f"{day:02d}.{month:02d}.{year}"
+                        birth_candidates.append((year, formatted_date))
+                        logger.info(f"Birth date candidate (DD MM YYYY): '{formatted_date}'")
+                        continue
+                    
+                    # Handle YYYY MM DD format
+                    year, month, day = int(groups[0]), int(groups[1]), int(groups[2])
+                    if 1 <= day <= 31 and 1 <= month <= 12 and 1950 <= year <= 2010:
+                        formatted_date = f"{day:02d}.{month:02d}.{year}"
+                        birth_candidates.append((year, formatted_date))
+                        logger.info(f"Birth date candidate (YYYY MM DD): '{formatted_date}'")
+            else:
+                # Handle 8 digits with any spacing pattern
+                digits_only = re.sub(r'\D', '', match.group())
+                
+                if len(digits_only) == 8:
+                    try:
+                        # Try DDMMYYYY format first
+                        day = int(digits_only[:2])
+                        month = int(digits_only[2:4])
+                        year = int(digits_only[4:])
+                        
+                        if 1 <= day <= 31 and 1 <= month <= 12 and 1950 <= year <= 2010:
+                            formatted_date = f"{day:02d}.{month:02d}.{year}"
+                            birth_candidates.append((year, formatted_date))
+                            logger.info(f"Birth date candidate (8 digits DDMMYYYY): '{formatted_date}'")
+                            continue
+                        
+                        # Try YYYYMMDD format
+                        year = int(digits_only[:4])
+                        month = int(digits_only[4:6])
+                        day = int(digits_only[6:])
+                        
+                        if 1 <= day <= 31 and 1 <= month <= 12 and 1950 <= year <= 2010:
+                            formatted_date = f"{day:02d}.{month:02d}.{year}"
+                            birth_candidates.append((year, formatted_date))
+                            logger.info(f"Birth date candidate (8 digits YYYYMMDD): '{formatted_date}'")
+                            
+                    except ValueError:
+                        continue
+    
+    # Take the earliest birth date found (oldest person)
+    if birth_candidates:
+        birth_candidates.sort()  # Sort by year
+        date_of_birth = birth_candidates[0][1]
+        logger.info(f"Date of birth selected: '{date_of_birth}'")
+    
+    # Method 2: Fallback to traditional date pattern matching
+    if not date_of_birth:
+        traditional_patterns = [
+            r'\b(\d{2})[\.\-\/\s]+(\d{2})[\.\-\/\s]+(\d{4})\b',
+            r'\b(\d{1,2})[\.\-\/](\d{1,2})[\.\-\/](\d{4})\b'
+        ]
+        
+        all_found_dates = []
+        for pattern in traditional_patterns:
+            matches = re.finditer(pattern, full_text)
+            for match in matches:
+                day, month, year = match.groups()
+                try:
+                    day_int, month_int, year_int = int(day), int(month), int(year)
+                    if 1 <= day_int <= 31 and 1 <= month_int <= 12:
+                        formatted_date = f"{day.zfill(2)}.{month.zfill(2)}.{year}"
+                        all_found_dates.append((year_int, formatted_date, match.start()))
+                except:
+                    continue
+        
+        # Sort by year and find birth date (1950-2010)
+        all_found_dates.sort()
+        for year_int, formatted_date, position in all_found_dates:
+            if 1950 <= year_int <= 2010:
+                date_of_birth = formatted_date
+                logger.info(f"Date of birth (fallback): '{date_of_birth}'")
+                break
+    # 7. PLACE OF BIRTH
+    place_of_birth = None
+    
+    # Method 1: Search after "LIEU DE NAISSANCE" label
+    for i, line in enumerate(lines):
+        if 'LIEU DE NAISSANCE' in line.upper() or 'PLACE OF BIRTH' in line.upper():
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if next_line and len(next_line) > 2:
+                    place_of_birth = next_line
+                    logger.info(f"Place after label: '{place_of_birth}'")
+                    break
+    
+    # Method 2: Search for known French cities
+    if not place_of_birth:
+        french_cities = ['PARIS', 'LYON', 'MARSEILLE', 'TOULOUSE', 'NICE', 'NANTES', 'BORDEAUX', 'LILLE', 'RENNES', 'STRASBOURG']
+        for city in french_cities:
+            if city in full_text.upper():
+                place_of_birth = city
+                logger.info(f"City detected: '{place_of_birth}'")
+                break
+    
+    # 8. EXPIRY DATE - Search for 8 digits (possibly with spaces)
+    expiry_date = None
+    
+    # Method 1: Search for exactly 8 digits (with possible spaces) for expiry date
+    eight_digit_patterns = [
+        r'\b(\d{2})\s*(\d{2})\s*(\d{4})\b',  # DD MM YYYY with spaces
+        r'\b(\d{4})\s*(\d{2})\s*(\d{2})\b',  # YYYY MM DD with spaces
+        r'(\d\s*\d\s*\d\s*\d\s*\d\s*\d\s*\d\s*\d)',  # 8 digits with any spacing
+    ]
+    
+    for pattern in eight_digit_patterns:
+        matches = re.finditer(pattern, full_text)
+        for match in matches:
+            # Extract all digits and remove spaces
+            digits_only = re.sub(r'\D', '', match.group())
+            
+            if len(digits_only) == 8:
+                # Try to parse as date: DDMMYYYY or YYYYMMDD
+                try:
+                    # Try DDMMYYYY format first
+                    day = int(digits_only[:2])
+                    month = int(digits_only[2:4])
+                    year = int(digits_only[4:])
+                    
+                    if 1 <= day <= 31 and 1 <= month <= 12 and year >= 2020:
+                        expiry_date = f"{day:02d}.{month:02d}.{year}"
+                        logger.info(f"Expiry date found (DDMMYYYY): '{expiry_date}'")
+                        break
+                    
+                    # Try YYYYMMDD format
+                    year = int(digits_only[:4])
+                    month = int(digits_only[4:6])
+                    day = int(digits_only[6:])
+                    
+                    if 1 <= day <= 31 and 1 <= month <= 12 and year >= 2020:
+                        expiry_date = f"{day:02d}.{month:02d}.{year}"
+                        logger.info(f"Expiry date found (YYYYMMDD): '{expiry_date}'")
+                        break
+                        
+                except ValueError:
+                    continue
+        
+        if expiry_date:
+            break
+    
+    # Method 2: Search for recent dates (after 2020) as expiry
+    if not expiry_date:
+        for year_int, formatted_date, position in reversed(all_found_dates):
+            if year_int >= 2020 and formatted_date != date_of_birth:
+                expiry_date = formatted_date
+                logger.info(f"Expiry date (recent): '{expiry_date}'")
+                break
+    
+    # Method 3: Search near expiry keywords
+    if not expiry_date:
+        expiry_keywords = ['EXPIR', 'VALID', 'VALABLE', 'JUSQU', 'UNTIL']
+        for keyword in expiry_keywords:
+            pattern = rf'{keyword}.*?(\d{{2}}[\.\-\/]\d{{2}}[\.\-\/]\d{{4}})'
+            match = re.search(pattern, full_text, re.IGNORECASE)
+            if match:
+                expiry_date = match.group(1).replace('/', '.').replace('-', '.')
+                logger.info(f"Expiry date by keyword '{keyword}': '{expiry_date}'")
+                break
+    
+    # RESULTS - Only relevant fields for new French ID cards
     extracted_data = { 
-        "Identity number": identity_number, 
-        "Surname": surname.group(1) if surname else "Not found", 
-        "First name(s)": name.group(1) if name else "Not found", 
-        "Sex": sex.group(1) if sex else "Not found", 
-        "Date of birth": date_of_birth, 
-        "Place of birth": pob.group(1) if pob else "Not found", 
-        "Height": height.group(1) if height else "Not found" 
+        "Identity number": identity_number if identity_number else "Not found",
+        "Surname": surname if surname else "Not found", 
+        "First name(s)": first_names if first_names else "Not found", 
+        "Sex": sex if sex else "Not found", 
+        "Nationality": nationality if nationality else "Not found",
+        "Date of birth": date_of_birth if date_of_birth else "Not found", 
+        "Place of birth": place_of_birth if place_of_birth else "Not found", 
+        "Expiry date": expiry_date if expiry_date else "Not found"
+        # REMOVED: Height and Issue date (not present on new French ID cards)
     } 
-    return extracted_data 
+    
+    # Summary logs
+    detected_count = sum(1 for v in extracted_data.values() if v != 'Not found')
+    logger.info(f"=== NEW FRENCH ID CARD RESULTS ===")
+    logger.info(f"Fields detected: {detected_count}/8")
+    
+    for key, value in extracted_data.items():
+        status = "✅" if value != "Not found" else "❌"
+        logger.info(f"{status} {key}: {value}")
+    
+    return extracted_data
 
-def detect_document_type(text): 
-    """Document type detection - old_code.py version"""
-    if "passeport" in text.lower(): 
-        return "Passport" 
-    elif "CARTE NATIONALE" in text: 
-        if "IDENTITY CARD" in text: 
-            return "New ID card model" 
-        else: 
-            return "Old ID card model" 
-    return "Unknown document"
+def detect_document_type_improved(text):
+    """
+    Détection du type de document améliorée
+    """
+    text_upper = text.upper()
+    
+    if "PASSEPORT" in text_upper or "PASSPORT" in text_upper:
+        return "Passport"
+    elif "CARTE NATIONALE" in text_upper or "IDENTITY CARD" in text_upper:
+        if "IDENTITY CARD" in text_upper and "CARTE NATIONALE" in text_upper:
+            return "New French ID card model (bilingual)"
+        elif "CARTE NATIONALE D'IDENTITÉ" in text_upper:
+            return "French National Identity Card"
+        else:
+            return "Identity Card"
+    elif "PERMIS" in text_upper or "DRIVING" in text_upper or "DRIVER" in text_upper:
+        return "Driving License"
+    else:
+        return "Unknown document"
 
 class DocumentProcessor:
     """
@@ -207,7 +510,7 @@ class DocumentProcessor:
         logger.info(f"Processor initialized - OCR: {self.has_tesseract}, French: {self.has_french}")
         
     def classify_document(self, image_path):
-        """Intelligent document classification"""
+        """Classification corrigée pour les cartes d'identité françaises"""
         try:
             image = cv2.imread(image_path)
             if image is None:
@@ -216,31 +519,44 @@ class DocumentProcessor:
             height, width = image.shape[:2]
             aspect_ratio = width / height
             
-            # Characteristic color analysis
+            # Analyse des couleurs caractéristiques
             blue_score = self._detect_blue_background(image)
             red_score = self._detect_red_elements(image)
+            french_id_score = self._detect_french_id_card(image)
             
-            logger.info(f"Aspect ratio: {aspect_ratio:.2f}, Blue: {blue_score:.3f}, Red: {red_score:.3f}")
+            # Détection des éléments textuels caractéristiques
+            text_score = self._detect_french_text_elements(image)
             
-            # Classification based on visual characteristics
-            if 1.4 < aspect_ratio < 1.8:  # Card format
-                if blue_score > 0.12:  # French ID card (blue background)
-                    doc_type = 'ID Card'
-                    confidence = min(0.85 + blue_score * 0.15, 0.95)
-                elif red_score > 0.08:  # Driver license (red elements)
-                    doc_type = 'Driver License'
-                    confidence = min(0.80 + red_score * 0.15, 0.92)
-                else:
-                    doc_type = 'ID Card'  # Default for card format
-                    confidence = 0.70
-            elif aspect_ratio > 1.25:  # Booklet format
-                doc_type = 'Passport'
-                confidence = 0.82
-            else:
-                doc_type = 'Other'
-                confidence = 0.60
+            logger.info(f"Aspect ratio: {aspect_ratio:.2f}, Blue: {blue_score:.3f}, Red: {red_score:.3f}, French ID: {french_id_score:.3f}, Text: {text_score:.3f}")
+            
+            # NOUVELLE LOGIQUE DE CLASSIFICATION - PRIORITÉ AUX INDICES CI FRANÇAISE
+            
+            # 1. Détection forte de CI française (priorité absolue)
+            if (french_id_score > 0.08 or text_score > 0.1 or 
+                (blue_score > 0.05 and 1.4 < aspect_ratio < 2.0)):
+                doc_type = 'ID Card'
+                confidence = min(0.85 + (french_id_score + text_score + blue_score) * 0.3, 0.95)
                 
-            # Generate probabilities for all types
+            # 2. Format carte standard (1.4-1.9)
+            elif 1.4 < aspect_ratio < 1.9:
+                if red_score > 0.08:  # Permis de conduire
+                    doc_type = 'Driver License'
+                    confidence = min(0.80 + red_score * 0.15, 0.90)
+                else:
+                    doc_type = 'ID Card'  # Défaut pour format carte
+                    confidence = 0.75
+                    
+            # 3. Format très allongé (possible passeport) - SEULEMENT si aucun signe de CI
+            elif aspect_ratio > 2.0 and french_id_score < 0.05 and text_score < 0.05:
+                doc_type = 'Passport'
+                confidence = 0.70
+                
+            # 4. Autres cas - privilégier ID Card si doute
+            else:
+                doc_type = 'ID Card'
+                confidence = 0.65
+                    
+            # Génération des probabilités pour tous les types
             all_probabilities = self._generate_probabilities(doc_type, confidence)
             
             logger.info(f"Classification: {doc_type} (confidence: {confidence:.2f})")
@@ -252,23 +568,130 @@ class DocumentProcessor:
                 'analysis': {
                     'aspect_ratio': round(aspect_ratio, 2),
                     'blue_score': round(blue_score, 3),
-                    'red_score': round(red_score, 3)
+                    'red_score': round(red_score, 3),
+                    'french_id_score': round(french_id_score, 3),
+                    'text_score': round(text_score, 3)
                 }
             }
             
         except Exception as e:
-            logger.error(f"Classification error: {e}")
+            logger.error(f"Erreur de classification: {e}")
             return {'type': 'Error', 'confidence': 0.0, 'all_probabilities': {}}
+
+    def _detect_french_text_elements(self, image):
+        """Détection des éléments textuels caractéristiques des CI françaises"""
+        try:
+            # Conversion en niveaux de gris pour l'analyse textuelle
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # Amélioration du contraste pour la détection de texte
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            enhanced = clahe.apply(gray)
+            
+            # Détection des zones de texte horizontales (caractéristique des CI)
+            # Détection de lignes horizontales (texte aligné)
+            horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
+            horizontal_lines = cv2.morphologyEx(enhanced, cv2.MORPH_OPEN, horizontal_kernel)
+            
+            # Score basé sur la densité des lignes horizontales (texte structuré)
+            line_ratio = np.sum(horizontal_lines > 0) / (horizontal_lines.shape[0] * horizontal_lines.shape[1])
+            
+            # Bonus pour la détection de structures rectangulaires (cadres de photo, etc.)
+            edges = cv2.Canny(enhanced, 50, 150)
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            rectangular_shapes = 0
+            for contour in contours:
+                if cv2.contourArea(contour) > 1000:  # Assez grand
+                    approx = cv2.approxPolyDP(contour, 0.02 * cv2.arcLength(contour, True), True)
+                    if len(approx) == 4:  # Forme rectangulaire
+                        rectangular_shapes += 1
+            
+            # Score composite
+            text_score = line_ratio * 0.8 + min(rectangular_shapes * 0.1, 0.3)
+            
+            return min(text_score, 1.0)
+            
+        except Exception as e:
+            logger.error(f"Erreur détection texte CI: {e}")
+            return 0.0
+        
+    def _detect_french_id_card(self, image):
+        """Détection spécifique des cartes d'identité françaises"""
+        try:
+            # Conversion en HSV pour une meilleure détection des couleurs
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            
+            # Détection du bleu caractéristique des CI françaises (plus large que précédemment)
+            # Bleu CI française - plage élargie
+            lower_blue1 = np.array([90, 30, 30])
+            upper_blue1 = np.array([130, 255, 255])
+            blue_mask = cv2.inRange(hsv, lower_blue1, upper_blue1)
+            
+            # Détection du rouge/bordeaux des éléments français (Marianne, etc.)
+            lower_red1 = np.array([0, 50, 50])
+            upper_red1 = np.array([15, 255, 255])
+            lower_red2 = np.array([165, 50, 50])
+            upper_red2 = np.array([180, 255, 255])
+            red_mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+            red_mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+            red_mask = red_mask1 + red_mask2
+            
+            # Score basé sur la présence des couleurs caractéristiques
+            total_pixels = image.shape[0] * image.shape[1]
+            blue_ratio = np.sum(blue_mask > 0) / total_pixels
+            red_ratio = np.sum(red_mask > 0) / total_pixels
+            
+            # Score composite pour CI française
+            french_score = blue_ratio * 0.7 + red_ratio * 0.3
+            
+            # Bonus si on détecte les deux couleurs (bleu + rouge = tri-colore français)
+            if blue_ratio > 0.05 and red_ratio > 0.02:
+                french_score *= 1.5
+                
+            return min(french_score, 1.0)
+            
+        except Exception as e:
+            logger.error(f"Erreur détection CI française: {e}")
+            return 0.0
     
     def _detect_blue_background(self, image):
-        """Detection of characteristic blue background of ID card"""
+        """Détection améliorée du fond bleu (CI française) - SEUILS ABAISSÉS"""
         try:
             hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-            # Blue range for French ID card
-            lower_blue = np.array([95, 50, 50])
-            upper_blue = np.array([125, 255, 255])
-            mask = cv2.inRange(hsv, lower_blue, upper_blue)
-            return np.sum(mask > 0) / (mask.shape[0] * mask.shape[1])
+            
+            # Plages TRÈS élargies pour capturer tous les bleus des CI françaises
+            # y compris les bleus clairs et délavés
+            lower_blue1 = np.array([80, 20, 30])   # Seuils très bas
+            upper_blue1 = np.array([140, 255, 255])
+            
+            # Bleu spécifique CI française 
+            lower_blue2 = np.array([95, 30, 40])
+            upper_blue2 = np.array([125, 200, 200])
+            
+            # Bleus très clairs (presque gris-bleu)
+            lower_blue3 = np.array([85, 15, 50])
+            upper_blue3 = np.array([130, 100, 150])
+            
+            mask1 = cv2.inRange(hsv, lower_blue1, upper_blue1)
+            mask2 = cv2.inRange(hsv, lower_blue2, upper_blue2)
+            mask3 = cv2.inRange(hsv, lower_blue3, upper_blue3)
+            
+            # Combinaison de TOUS les masques
+            combined_mask = cv2.bitwise_or(mask1, cv2.bitwise_or(mask2, mask3))
+            
+            # Score plus généreux
+            score = np.sum(combined_mask > 0) / (combined_mask.shape[0] * combined_mask.shape[1])
+            
+            # Bonus si on trouve du bleu dans la partie supérieure (en-tête)
+            upper_region = combined_mask[:combined_mask.shape[0]//3, :]
+            upper_score = np.sum(upper_region > 0) / (upper_region.shape[0] * upper_region.shape[1])
+            
+            if upper_score > 0.1:  # Bleu détecté dans l'en-tête
+                score *= 1.5
+            
+            return min(score, 1.0)
+            
         except:
             return 0.0
     
@@ -392,20 +815,20 @@ No.: 987654321098"""
         }
     
     def extract_structured_information(self, classification_result, ocr_result):
-        """Structured information extraction - uses both methods"""
+        """Structured information extraction - uses improved methods"""
         doc_type = classification_result.get('type', 'Other')
         raw_text = ocr_result.get('raw_text', '')
         
         if doc_type == 'ID Card':
-            # Use basic method from old_code.py first
-            basic_info = extract_info_basic(raw_text)
+            # CORRECTION: Utiliser extract_info_basic_improved au lieu de extract_info_basic
+            improved_info = extract_info_basic_improved(raw_text)
             
             # Add document information
-            basic_info['document_type'] = 'National Identity Card'
-            basic_info['extraction_method'] = 'old_code.py improved'
-            basic_info['document_detection'] = detect_document_type(raw_text)
+            improved_info['document_type'] = 'National Identity Card'
+            improved_info['extraction_method'] = 'Improved line-by-line parsing'
+            improved_info['document_detection'] = detect_document_type_improved(raw_text)
             
-            return basic_info
+            return improved_info
             
         elif doc_type == 'Passport':
             return {
@@ -666,9 +1089,10 @@ def get_results_template():
     <!doctype html>
     <html>
     <head>
-        <title>AI Analysis Results</title>
+        <title>AI Analysis Results - French ID Cards</title>
         <meta charset="UTF-8">
         <style>
+            /* Styles identiques au précédent */
             body { 
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
                 margin: 20px; 
@@ -832,7 +1256,7 @@ def get_results_template():
     <body>
         <div class="container">
             <div class="header">
-                <h1>Analysis Results</h1>
+                <h1>Analysis Results - French ID Card</h1>
                 <p>Processing completed in <strong>{{ report.processing_time }}s</strong> | {{ report.timestamp }}</p>
                 <p>
                     <strong>OCR Mode:</strong> 
@@ -962,9 +1386,9 @@ def get_results_template():
                 {% endif %}
             </div>
 
-            <!-- Structured information -->
+            <!-- Structured information - MODIFIÉ pour nouvelles CI -->
             <div class="section info">
-                <h2>Extracted and Structured Information</h2>
+                <h2>Extracted Information - French ID Card</h2>
                 <p><strong>Document type:</strong> {{ report.structured_information.document_type }}</p>
                 {% if report.structured_information.extraction_method %}
                 <p><strong>Extraction method:</strong> {{ report.structured_information.extraction_method }}</p>
@@ -979,15 +1403,21 @@ def get_results_template():
                     </thead>
                     <tbody>
                         {% for key, value in report.structured_information.items() %}
-                        {% if key not in ['document_type', 'extraction_method', 'document_detection', 'detected_text', 'note', 'raw_text'] %}
+                        {% if key not in ['document_type', 'extraction_method', 'document_detection', 'detected_text', 'note', 'raw_text', 'Height', 'Issue date'] %}
                         <tr>
                             <td><strong>{{ key.replace('_', ' ').title() }}</strong></td>
-                            <td>{{ value }}</td>
+                            <td>
+                                {% if key == 'Identity Number' and value != 'Not found' %}
+                                    <code style="background: #f8f9fa; padding: 5px; border-radius: 3px; font-weight: bold; color: #007bff;">{{ value }}</code>
+                                {% else %}
+                                    {{ value }}
+                                {% endif %}
+                            </td>
                             <td>
                                 {% if value not in ["Not detected", "Not found"] %}
-                                    <span style="color: #28a745; font-weight: bold;">Detected</span>
+                                    <span style="color: #28a745; font-weight: bold;">✅ Detected</span>
                                 {% else %}
-                                    <span style="color: #dc3545; font-weight: bold;">Not detected</span>
+                                    <span style="color: #dc3545; font-weight: bold;">❌ Not detected</span>
                                 {% endif %}
                             </td>
                         </tr>
@@ -995,6 +1425,10 @@ def get_results_template():
                         {% endfor %}
                     </tbody>
                 </table>
+                
+                <div style="margin-top: 20px; padding: 15px; background-color: #e7f3ff; border-radius: 8px; border-left: 5px solid #007bff;">
+                    <strong>ℹ️ Note:</strong> This interface is optimized for new French ID cards (2021+). Fields like "Height" and "Issue Date" are not displayed as they don't exist on these documents.
+                </div>
             </div>
 
             <!-- System information -->
