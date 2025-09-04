@@ -41,7 +41,7 @@ try:
     # Check available languages
     try:
         langs = pytesseract.get_languages()
-        print(f"📚 Available languages: {', '.join(langs)}")
+        print(f" Available languages: {', '.join(langs)}")
         HAS_FRENCH = 'fra' in langs
         if HAS_FRENCH:
             print("✅ French available")
@@ -54,7 +54,7 @@ except Exception as e:
     HAS_TESSERACT = False
     HAS_FRENCH = False
     print(f"❌ Tesseract not available: {e}")
-    print("🔧 To install on macOS:")
+    print("  To install on macOS:")
     print("   brew install tesseract tesseract-lang")
     print("   pip3 install pytesseract")
 
