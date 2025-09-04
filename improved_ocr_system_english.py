@@ -142,38 +142,201 @@ def extract_info_with_confidence(image_path):
     
     return text, average_confidence, is_confident 
 
-def extract_info_basic_improved(text): 
+def detect_id_card_model(text):
     """
-    Information extraction improved for new French ID cards
-    Adapted for fields actually present on new cards
+    Detect if ID card is old or new model based on text content
+    """
+    text_upper = text.upper()
+    
+    # Indicators of new model (2021+)
+    new_model_indicators = [
+        'IDENTITY CARD',  # Bilingual format
+        '/IDENTITY CARD', # Format with slash
+        'GIVEN NAMES',    # English text presence
+        'PLACE OF BIRTH', # English labels
+        'DATE OF BIRTH',
+        'NATIONALITY'
+    ]
+    
+    # Indicators of old model (pre-2021)
+    old_model_indicators = [
+        'TAILLE',         # Height field (only on old cards)
+        'PREFECTURE',     # Issued by prefecture
+        'DELIVRE LE',     # Issue date (only on old cards)
+        'VALABLE JUSQU'   # Different expiry format
+    ]
+    
+    new_score = sum(1 for indicator in new_model_indicators if indicator in text_upper)
+    old_score = sum(1 for indicator in old_model_indicators if indicator in text_upper)
+    
+    # Decision logic
+    if new_score >= 2:
+        return "new", f"New model detected (score: {new_score}/6)"
+    elif old_score >= 1:
+        return "old", f"Old model detected (score: {old_score}/4)"
+    else:
+        # Default to new model for recent cards
+        return "new", "Assumed new model (default)"
+
+def extract_info_old_model(text):
+    """
+    Information extraction for OLD French ID cards (pre-2021)
+    Fields: Identity number (12 digits), Surname, First names, Sex, Date of birth, 
+            Place of birth, Height, Issue date, Issuing authority
     """
     # Normalize text and split into lines
     text = text.replace('|', ' ').replace('Ne:', ' ').replace('$', ' ')
     lines = [line.strip() for line in text.split('\n') if line.strip()]
-    
-    # Join all lines into single text for certain searches
     full_text = ' '.join(lines)
     
-    logger.info(f"=== EXTRACTION DEBUG (New French ID) ===")
+    logger.info(f"=== OLD MODEL EXTRACTION ===")
     logger.info(f"Lines detected: {len(lines)}")
-    for i, line in enumerate(lines):
-        logger.info(f"Line {i}: '{line}'")
     
-    # 1. DOCUMENT NUMBER - Exactly 9 characters (digits and letters)
+    # 1. IDENTITY NUMBER - 12 digits for old cards
+    identity_number = None
+    twelve_digit_match = re.search(r'\b(\d{12})\b', full_text)
+    if twelve_digit_match:
+        identity_number = twelve_digit_match.group(1)
+        logger.info(f"12-digit identity number found: {identity_number}")
+    else:
+        # Fallback: collect all digits and take first 12
+        all_digits = re.findall(r'\d', full_text)
+        if len(all_digits) >= 12:
+            identity_number = ''.join(all_digits)[:12]
+    
+    # 2. SURNAME - French labels
+    surname = None
+    surname_patterns = ['Nom', 'NOM']
+    for pattern in surname_patterns:
+        match = re.search(rf'{pattern}\s*[:]\s*([A-Z][A-Za-z\s-]+)', full_text)
+        if match:
+            surname = match.group(1).strip()
+            logger.info(f"Surname found: '{surname}'")
+            break
+    
+    # 3. FIRST NAMES - French labels
+    first_names = None
+    name_patterns = ['Prénom\\(s\\)', 'Prénoms', 'PRÉNOM']
+    for pattern in name_patterns:
+        match = re.search(rf'{pattern}\s*[:]\s*([A-Za-zÀ-ÿ\s,]+)', full_text)
+        if match:
+            first_names = match.group(1).strip()
+            logger.info(f"First names found: '{first_names}'")
+            break
+    
+    # 4. SEX - French format
+    sex = None
+    sex_match = re.search(r'Sexe\s*[:]\s*([MF])', full_text)
+    if sex_match:
+        sex = sex_match.group(1)
+        logger.info(f"Sex found: '{sex}'")
+    
+    # 5. DATE OF BIRTH - Traditional format
+    date_of_birth = None
+    # Look for DD.MM.YYYY format specifically
+    dob_patterns = [
+        r'\b(\d{2})\.(\d{2})\.(\d{4})\b',  # DD.MM.YYYY
+        r'(\d{2})/(\d{2})/(\d{4})',       # DD/MM/YYYY
+    ]
+    
+    for pattern in dob_patterns:
+        matches = re.finditer(pattern, full_text)
+        for match in matches:
+            day, month, year = match.groups()
+            year_int = int(year)
+            if 1920 <= year_int <= 2005:  # Birth date range for old cards
+                date_of_birth = f"{day}.{month}.{year}"
+                logger.info(f"Date of birth found: '{date_of_birth}'")
+                break
+        if date_of_birth:
+            break
+    
+    # 6. PLACE OF BIRTH - French format
+    place_of_birth = None
+    place_match = re.search(r'à \s+([A-Za-zÀ-ÿ\s\-\d]+)', full_text)
+    if place_match:
+        place_of_birth = place_match.group(1).strip()
+        logger.info(f"Place of birth found: '{place_of_birth}'")
+    
+    # 7. HEIGHT - Only on old cards
+    height = None
+    height_match = re.search(r'Taille\s*[:]\s*(\d[,\.]\d{2}\s*m)', full_text, re.IGNORECASE)
+    if height_match:
+        height = height_match.group(1)
+        logger.info(f"Height found: '{height}'")
+    
+    # 8. ISSUE DATE - Only on old cards
+    issue_date = None
+    issue_patterns = [
+        r'Délivré\s+le\s+(\d{2}[\.\/]\d{2}[\.\/]\d{4})',
+        r'Issued\s+on\s+(\d{2}[\.\/]\d{2}[\.\/]\d{4})'
+    ]
+    
+    for pattern in issue_patterns:
+        match = re.search(pattern, full_text, re.IGNORECASE)
+        if match:
+            issue_date = match.group(1).replace('/', '.')
+            logger.info(f"Issue date found: '{issue_date}'")
+            break
+    
+    # 9. ISSUING AUTHORITY - Only on old cards
+    issuing_authority = None
+    authority_patterns = [
+        r'(PRÉFECTURE[A-Za-zÀ-ÿ\s]+)',
+        r'(PREFECTURE[A-Za-z\s]+)'
+    ]
+    
+    for pattern in authority_patterns:
+        match = re.search(pattern, full_text, re.IGNORECASE)
+        if match:
+            issuing_authority = match.group(1).strip()
+            logger.info(f"Issuing authority found: '{issuing_authority}'")
+            break
+    
+    # Results for OLD model
+    extracted_data = { 
+        "Identity number": identity_number if identity_number else "Not found",
+        "Surname": surname if surname else "Not found", 
+        "First name(s)": first_names if first_names else "Not found", 
+        "Sex": sex if sex else "Not found", 
+        "Date of birth": date_of_birth if date_of_birth else "Not found", 
+        "Place of birth": place_of_birth if place_of_birth else "Not found", 
+        "Height": height if height else "Not found",
+        "Issue date": issue_date if issue_date else "Not found",
+        "Issuing authority": issuing_authority if issuing_authority else "Not found"
+    }
+    
+    detected_count = sum(1 for v in extracted_data.values() if v != 'Not found')
+    logger.info(f"OLD MODEL: Fields detected: {detected_count}/9")
+    
+    return extracted_data
+
+def extract_info_new_model(text):
+    """
+    Information extraction for NEW French ID cards (2021+)
+    Fields: Identity number (9 chars), Surname, First names, Sex, Nationality,
+            Date of birth, Place of birth, Expiry date
+    """
+    # Normalize text and split into lines
+    text = text.replace('|', ' ').replace('Ne:', ' ').replace('$', ' ')
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    full_text = ' '.join(lines)
+    
+    logger.info(f"=== NEW MODEL EXTRACTION ===")
+    logger.info(f"Lines detected: {len(lines)}")
+    
+    # 1. DOCUMENT NUMBER - Exactly 9 characters (new format)
     identity_number = None
     
-    # New French ID cards have exactly 9 characters
-    # Pattern: mix of letters and digits, exactly 9 characters
     nine_char_patterns = [
-        r'\b([A-Z0-9]{9})\b',  # 9 alphanumeric characters
-        r'\b([A-Z]\d{2}[A-Z]\d{2}[A-Z]{2}\d)\b',  # T7X62TZ79 format
-        r'\b([A-Z]{1,3}\d{1,6}[A-Z]{1,3})\b'  # Flexible letter/digit mix
+        r'\b([A-Z0-9]{9})\b',
+        r'\b([A-Z]\d{2}[A-Z]\d{2}[A-Z]{2}\d)\b',
+        r'\b([A-Z]{1,3}\d{1,6}[A-Z]{1,3})\b'
     ]
     
     for pattern in nine_char_patterns:
         matches = re.findall(pattern, full_text)
         for match in matches:
-            # Verify it's exactly 9 characters and contains both letters and digits
             if len(match) == 9 and re.search(r'[A-Z]', match) and re.search(r'\d', match):
                 identity_number = match
                 logger.info(f"9-character document number found: {identity_number}")
@@ -181,7 +344,7 @@ def extract_info_basic_improved(text):
         if identity_number:
             break
     
-    # Fallback: search for 9-character sequences with possible spaces
+    # Fallback: search with spaces
     if not identity_number:
         spaced_match = re.search(r'([A-Z0-9]\s*[A-Z0-9]\s*[A-Z0-9]\s*[A-Z0-9]\s*[A-Z0-9]\s*[A-Z0-9]\s*[A-Z0-9]\s*[A-Z0-9]\s*[A-Z0-9])', full_text)
         if spaced_match:
@@ -190,7 +353,7 @@ def extract_info_basic_improved(text):
                 identity_number = candidate
                 logger.info(f"9-character number found with spaces: {identity_number}")
     
-    # 2. SURNAME
+    # 2. SURNAME - Bilingual format
     surname = None
     for i, line in enumerate(lines):
         if 'NOM' in line.upper() and ('SURNAME' in line.upper() or '/' in line):
@@ -201,18 +364,18 @@ def extract_info_basic_improved(text):
                     logger.info(f"Surname found: '{surname}'")
                     break
     
-    # Fallback: search for capitalized words that look like surnames
+    # Fallback pattern matching
     if not surname:
         for line in lines:
             line_clean = line.strip().upper()
             if re.match(r'^[A-Z]{4,}$', line_clean):
-                excluded_keywords = ['CARTE', 'NATIONALE', 'IDENTITE', 'IDENTITY', 'CARD', 'SEXE', 'DATE', 'LIEU', 'PLACE']
-                if line_clean not in excluded_keywords:
+                excluded = ['CARTE', 'NATIONALE', 'IDENTITE', 'IDENTITY', 'CARD', 'SEXE', 'DATE', 'LIEU', 'PLACE']
+                if line_clean not in excluded:
                     surname = line_clean
                     logger.info(f"Surname found by pattern: '{surname}'")
                     break
     
-    # 3. FIRST NAMES
+    # 3. FIRST NAMES - Bilingual format
     first_names = None
     for i, line in enumerate(lines):
         if 'PRENOMS' in line.upper() or 'GIVEN NAMES' in line.upper():
@@ -220,76 +383,59 @@ def extract_info_basic_improved(text):
                 next_line = lines[i + 1].strip()
                 if next_line and ',' in next_line:
                     first_names = next_line
-                    logger.info(f"First names found after label: '{first_names}'")
+                    logger.info(f"First names found: '{first_names}'")
                     break
     
-    # Fallback: search for lines with comma-separated names
+    # Fallback: comma-separated names
     if not first_names:
         for line in lines:
-            if ',' in line and re.match(r'^[A-Za-zàâäéèêëïîôöùûüÿç\s,]+$', line.strip()):
+            if ',' in line and re.match(r'^[A-Za-zÀ-ÿ\s,]+$', line.strip()):
                 parts = [part.strip() for part in line.split(',')]
                 if len(parts) >= 2 and all(len(part) >= 2 for part in parts):
                     first_names = line.strip()
                     logger.info(f"First names found by pattern: '{first_names}'")
                     break
     
-    # 4. SEX - Improved detection
+    # 4. SEX - Improved detection for new format
     sex = None
-    
-    # Method 1: Search in lines containing SEXE
     for line in lines:
         if 'SEXE' in line.upper() or 'SEX' in line.upper():
             sex_match = re.search(r'\b([FM])\b', line.upper())
             if sex_match:
                 sex = sex_match.group(1)
-                logger.info(f"Sex found in SEXE line: '{sex}'")
-                break
-            
-            # If not found on same line, check following lines
-            line_index = lines.index(line)
-            for j in range(line_index + 1, min(line_index + 3, len(lines))):
-                next_line = lines[j].upper().strip()
-                if next_line in ['F', 'M']:
-                    sex = next_line
-                    logger.info(f"Sex found in following line: '{sex}'")
-                    break
-            if sex:
+                logger.info(f"Sex found: '{sex}'")
                 break
     
-    # Method 2: Search for isolated F or M near personal info
+    # Context-based fallback
     if not sex:
         for i, line in enumerate(lines):
             if line.strip().upper() in ['F', 'M']:
-                # Check if we're in personal info context
                 context = ' '.join(lines[max(0, i-2):min(len(lines), i+3)]).upper()
-                context_keywords = ['DATE', 'NAISS', 'BIRTH', 'FRA', 'SEXE']
-                if any(keyword in context for keyword in context_keywords):
+                if any(keyword in context for keyword in ['DATE', 'NAISS', 'BIRTH', 'FRA', 'SEXE']):
                     sex = line.strip().upper()
                     logger.info(f"Sex found by context: '{sex}'")
                     break
     
-    # 5. NATIONALITY
+    # 5. NATIONALITY - New cards include this
     nationality = None
     nat_match = re.search(r'\b(FRA|FRANÇAISE?|FRENCH)\b', full_text.upper())
     if nat_match:
         nationality = nat_match.group(1)
         logger.info(f"Nationality: '{nationality}'")
     
-    # 6. DATE OF BIRTH - Search for 8 digits (possibly with spaces)
+    # 6. DATE OF BIRTH - 8 digits with spaces
     date_of_birth = None
-    
-    # Search for exactly 8 digits (with possible spaces) for birth date
     birth_date_patterns = [
-        r'\b(\d{2})\s*(\d{2})\s*(\d{4})\b',  # DD MM YYYY with spaces
-        r'\b(\d{4})\s*(\d{2})\s*(\d{2})\b',  # YYYY MM DD with spaces
-        r'(\d\s*\d\s*\d\s*\d\s*\d\s*\d\s*\d\s*\d)',  # 8 digits with any spacing
+        r'\b(\d{2})\s*(\d{2})\s*(\d{4})\b',
+        r'\b(\d{4})\s*(\d{2})\s*(\d{2})\b',
+        r'(\d\s*\d\s*\d\s*\d\s*\d\s*\d\s*\d\s*\d)',
     ]
     
     birth_candidates = []
     for pattern in birth_date_patterns:
         matches = re.finditer(pattern, full_text)
         for match in matches:
-            if len(match.groups()) >= 2:  # For DD MM YYYY or YYYY MM DD patterns
+            if len(match.groups()) >= 2:
                 groups = match.groups()
                 if len(groups) == 3:
                     # Handle DD MM YYYY format
@@ -297,7 +443,6 @@ def extract_info_basic_improved(text):
                     if 1 <= day <= 31 and 1 <= month <= 12 and 1950 <= year <= 2010:
                         formatted_date = f"{day:02d}.{month:02d}.{year}"
                         birth_candidates.append((year, formatted_date))
-                        logger.info(f"Birth date candidate (DD MM YYYY): '{formatted_date}'")
                         continue
                     
                     # Handle YYYY MM DD format
@@ -305,14 +450,12 @@ def extract_info_basic_improved(text):
                     if 1 <= day <= 31 and 1 <= month <= 12 and 1950 <= year <= 2010:
                         formatted_date = f"{day:02d}.{month:02d}.{year}"
                         birth_candidates.append((year, formatted_date))
-                        logger.info(f"Birth date candidate (YYYY MM DD): '{formatted_date}'")
             else:
-                # Handle 8 digits with any spacing pattern
+                # Handle 8 digits with spacing
                 digits_only = re.sub(r'\D', '', match.group())
-                
                 if len(digits_only) == 8:
                     try:
-                        # Try DDMMYYYY format first
+                        # Try DDMMYYYY
                         day = int(digits_only[:2])
                         month = int(digits_only[2:4])
                         year = int(digits_only[4:])
@@ -320,10 +463,9 @@ def extract_info_basic_improved(text):
                         if 1 <= day <= 31 and 1 <= month <= 12 and 1950 <= year <= 2010:
                             formatted_date = f"{day:02d}.{month:02d}.{year}"
                             birth_candidates.append((year, formatted_date))
-                            logger.info(f"Birth date candidate (8 digits DDMMYYYY): '{formatted_date}'")
                             continue
                         
-                        # Try YYYYMMDD format
+                        # Try YYYYMMDD
                         year = int(digits_only[:4])
                         month = int(digits_only[4:6])
                         day = int(digits_only[6:])
@@ -331,48 +473,16 @@ def extract_info_basic_improved(text):
                         if 1 <= day <= 31 and 1 <= month <= 12 and 1950 <= year <= 2010:
                             formatted_date = f"{day:02d}.{month:02d}.{year}"
                             birth_candidates.append((year, formatted_date))
-                            logger.info(f"Birth date candidate (8 digits YYYYMMDD): '{formatted_date}'")
-                            
                     except ValueError:
                         continue
     
-    # Take the earliest birth date found (oldest person)
     if birth_candidates:
-        birth_candidates.sort()  # Sort by year
+        birth_candidates.sort()
         date_of_birth = birth_candidates[0][1]
         logger.info(f"Date of birth selected: '{date_of_birth}'")
     
-    # Method 2: Fallback to traditional date pattern matching
-    if not date_of_birth:
-        traditional_patterns = [
-            r'\b(\d{2})[\.\-\/\s]+(\d{2})[\.\-\/\s]+(\d{4})\b',
-            r'\b(\d{1,2})[\.\-\/](\d{1,2})[\.\-\/](\d{4})\b'
-        ]
-        
-        all_found_dates = []
-        for pattern in traditional_patterns:
-            matches = re.finditer(pattern, full_text)
-            for match in matches:
-                day, month, year = match.groups()
-                try:
-                    day_int, month_int, year_int = int(day), int(month), int(year)
-                    if 1 <= day_int <= 31 and 1 <= month_int <= 12:
-                        formatted_date = f"{day.zfill(2)}.{month.zfill(2)}.{year}"
-                        all_found_dates.append((year_int, formatted_date, match.start()))
-                except:
-                    continue
-        
-        # Sort by year and find birth date (1950-2010)
-        all_found_dates.sort()
-        for year_int, formatted_date, position in all_found_dates:
-            if 1950 <= year_int <= 2010:
-                date_of_birth = formatted_date
-                logger.info(f"Date of birth (fallback): '{date_of_birth}'")
-                break
-    # 7. PLACE OF BIRTH
+    # 7. PLACE OF BIRTH - Bilingual format
     place_of_birth = None
-    
-    # Method 1: Search after "LIEU DE NAISSANCE" label
     for i, line in enumerate(lines):
         if 'LIEU DE NAISSANCE' in line.upper() or 'PLACE OF BIRTH' in line.upper():
             if i + 1 < len(lines):
@@ -382,7 +492,7 @@ def extract_info_basic_improved(text):
                     logger.info(f"Place after label: '{place_of_birth}'")
                     break
     
-    # Method 2: Search for known French cities
+    # Fallback: known French cities
     if not place_of_birth:
         french_cities = ['PARIS', 'LYON', 'MARSEILLE', 'TOULOUSE', 'NICE', 'NANTES', 'BORDEAUX', 'LILLE', 'RENNES', 'STRASBOURG']
         for city in french_cities:
@@ -391,71 +501,49 @@ def extract_info_basic_improved(text):
                 logger.info(f"City detected: '{place_of_birth}'")
                 break
     
-    # 8. EXPIRY DATE - Search for 8 digits (possibly with spaces)
+    # 8. EXPIRY DATE - Only on new cards
     expiry_date = None
     
-    # Method 1: Search for exactly 8 digits (with possible spaces) for expiry date
-    eight_digit_patterns = [
-        r'\b(\d{2})\s*(\d{2})\s*(\d{4})\b',  # DD MM YYYY with spaces
-        r'\b(\d{4})\s*(\d{2})\s*(\d{2})\b',  # YYYY MM DD with spaces
-        r'(\d\s*\d\s*\d\s*\d\s*\d\s*\d\s*\d\s*\d)',  # 8 digits with any spacing
+    # Search for 8 digits for expiry (2020+ years)
+    expiry_patterns = [
+        r'\b(\d{2})\s*(\d{2})\s*(\d{4})\b',
+        r'\b(\d{4})\s*(\d{2})\s*(\d{2})\b',
+        r'(\d\s*\d\s*\d\s*\d\s*\d\s*\d\s*\d\s*\d)',
     ]
     
-    for pattern in eight_digit_patterns:
+    for pattern in expiry_patterns:
         matches = re.finditer(pattern, full_text)
         for match in matches:
-            # Extract all digits and remove spaces
             digits_only = re.sub(r'\D', '', match.group())
             
             if len(digits_only) == 8:
-                # Try to parse as date: DDMMYYYY or YYYYMMDD
                 try:
-                    # Try DDMMYYYY format first
+                    # Try DDMMYYYY
                     day = int(digits_only[:2])
                     month = int(digits_only[2:4])
                     year = int(digits_only[4:])
                     
                     if 1 <= day <= 31 and 1 <= month <= 12 and year >= 2020:
                         expiry_date = f"{day:02d}.{month:02d}.{year}"
-                        logger.info(f"Expiry date found (DDMMYYYY): '{expiry_date}'")
+                        logger.info(f"Expiry date found: '{expiry_date}'")
                         break
                     
-                    # Try YYYYMMDD format
+                    # Try YYYYMMDD
                     year = int(digits_only[:4])
                     month = int(digits_only[4:6])
                     day = int(digits_only[6:])
                     
                     if 1 <= day <= 31 and 1 <= month <= 12 and year >= 2020:
                         expiry_date = f"{day:02d}.{month:02d}.{year}"
-                        logger.info(f"Expiry date found (YYYYMMDD): '{expiry_date}'")
+                        logger.info(f"Expiry date found: '{expiry_date}'")
                         break
-                        
                 except ValueError:
                     continue
         
         if expiry_date:
             break
     
-    # Method 2: Search for recent dates (after 2020) as expiry
-    if not expiry_date:
-        for year_int, formatted_date, position in reversed(all_found_dates):
-            if year_int >= 2020 and formatted_date != date_of_birth:
-                expiry_date = formatted_date
-                logger.info(f"Expiry date (recent): '{expiry_date}'")
-                break
-    
-    # Method 3: Search near expiry keywords
-    if not expiry_date:
-        expiry_keywords = ['EXPIR', 'VALID', 'VALABLE', 'JUSQU', 'UNTIL']
-        for keyword in expiry_keywords:
-            pattern = rf'{keyword}.*?(\d{{2}}[\.\-\/]\d{{2}}[\.\-\/]\d{{4}})'
-            match = re.search(pattern, full_text, re.IGNORECASE)
-            if match:
-                expiry_date = match.group(1).replace('/', '.').replace('-', '.')
-                logger.info(f"Expiry date by keyword '{keyword}': '{expiry_date}'")
-                break
-    
-    # RESULTS - Only relevant fields for new French ID cards
+    # Results for NEW model
     extracted_data = { 
         "Identity number": identity_number if identity_number else "Not found",
         "Surname": surname if surname else "Not found", 
@@ -465,39 +553,12 @@ def extract_info_basic_improved(text):
         "Date of birth": date_of_birth if date_of_birth else "Not found", 
         "Place of birth": place_of_birth if place_of_birth else "Not found", 
         "Expiry date": expiry_date if expiry_date else "Not found"
-        # REMOVED: Height and Issue date (not present on new French ID cards)
-    } 
+    }
     
-    # Summary logs
     detected_count = sum(1 for v in extracted_data.values() if v != 'Not found')
-    logger.info(f"=== NEW FRENCH ID CARD RESULTS ===")
-    logger.info(f"Fields detected: {detected_count}/8")
-    
-    for key, value in extracted_data.items():
-        status = "✅" if value != "Not found" else "❌"
-        logger.info(f"{status} {key}: {value}")
+    logger.info(f"NEW MODEL: Fields detected: {detected_count}/8")
     
     return extracted_data
-
-def detect_document_type_improved(text):
-    """
-    Détection du type de document améliorée
-    """
-    text_upper = text.upper()
-    
-    if "PASSEPORT" in text_upper or "PASSPORT" in text_upper:
-        return "Passport"
-    elif "CARTE NATIONALE" in text_upper or "IDENTITY CARD" in text_upper:
-        if "IDENTITY CARD" in text_upper and "CARTE NATIONALE" in text_upper:
-            return "New French ID card model (bilingual)"
-        elif "CARTE NATIONALE D'IDENTITÉ" in text_upper:
-            return "French National Identity Card"
-        else:
-            return "Identity Card"
-    elif "PERMIS" in text_upper or "DRIVING" in text_upper or "DRIVER" in text_upper:
-        return "Driving License"
-    else:
-        return "Unknown document"
 
 class DocumentProcessor:
     """
@@ -815,36 +876,56 @@ No.: 987654321098"""
         }
     
     def extract_structured_information(self, classification_result, ocr_result):
-        """Structured information extraction - uses improved methods"""
+        """
+        Adaptive information extraction based on ID card model detection
+        Uses different extraction methods and displays different fields
+        """
         doc_type = classification_result.get('type', 'Other')
         raw_text = ocr_result.get('raw_text', '')
         
         if doc_type == 'ID Card':
-            # CORRECTION: Utiliser extract_info_basic_improved au lieu de extract_info_basic
-            improved_info = extract_info_basic_improved(raw_text)
+            # Step 1: Detect ID card model (old vs new)
+            model_type, detection_reason = detect_id_card_model(raw_text)
             
-            # Add document information
-            improved_info['document_type'] = 'National Identity Card'
-            improved_info['extraction_method'] = 'Improved line-by-line parsing'
-            improved_info['document_detection'] = detect_document_type_improved(raw_text)
+            logger.info(f"ID Card model detected: {model_type} - {detection_reason}")
             
-            return improved_info
+            # Step 2: Use appropriate extraction method
+            if model_type == "old":
+                extracted_info = extract_info_old_model(raw_text)
+                extraction_method = "Old French ID Card extraction (pre-2021)"
+                document_subtype = "Old French ID Card (pre-2021)"
+            else:
+                extracted_info = extract_info_new_model(raw_text)
+                extraction_method = "New French ID Card extraction (2021+)"
+                document_subtype = "New French ID Card (2021+)"
+            
+            # Step 3: Add metadata
+            extracted_info['document_type'] = 'French National Identity Card'
+            extracted_info['document_subtype'] = document_subtype
+            extracted_info['card_model'] = model_type
+            extracted_info['extraction_method'] = extraction_method
+            extracted_info['detection_reason'] = detection_reason
+            
+            return extracted_info
             
         elif doc_type == 'Passport':
             return {
                 'document_type': 'Passport',
+                'card_model': 'passport',
                 'detected_text': raw_text[:300] + "..." if len(raw_text) > 300 else raw_text,
                 'note': 'Passport parser in development'
             }
         elif doc_type == 'Driver License':
             return {
                 'document_type': 'Driver License',
+                'card_model': 'license',
                 'detected_text': raw_text[:300] + "..." if len(raw_text) > 300 else raw_text,
                 'note': 'Driver license parser in development'
             }
         else:
             return {
                 'document_type': 'Unidentified document',
+                'card_model': 'unknown',
                 'raw_text': raw_text[:300] + "..." if len(raw_text) > 300 else raw_text
             }
 
@@ -1089,7 +1170,6 @@ def get_results_template():
         <title>AI Analysis Results - French ID Cards</title>
         <meta charset="UTF-8">
         <style>
-            /* Styles identiques au précédent */
             body { 
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
                 margin: 20px; 
@@ -1123,7 +1203,8 @@ def get_results_template():
             .info { background: linear-gradient(45deg, #d1ecf1, #bee5eb); border-color: #17a2b8; }
             .warning { background: linear-gradient(45deg, #fff3cd, #ffeaa7); border-color: #ffc107; }
             .error { background: linear-gradient(45deg, #f8d7da, #f5c6cb); border-color: #dc3545; }
-            .improved { background: linear-gradient(45deg, #28a745, #20c997); color: white; }
+            .old-model { background: linear-gradient(45deg, #ffeaa7, #fff3cd); border-color: #e67e22; }
+            .new-model { background: linear-gradient(45deg, #28a745, #20c997); color: white; }
             
             .image-preview { 
                 max-width: 300px; 
@@ -1211,43 +1292,29 @@ def get_results_template():
                 line-height: 1.5;
             }
             
-            .json-view { 
-                background: #f8f9fa; 
-                padding: 20px; 
-                border-radius: 8px; 
-                white-space: pre-wrap; 
-                font-family: 'Monaco', 'Menlo', monospace; 
-                font-size: 12px; 
-                max-height: 400px; 
-                overflow-y: auto; 
-                border: 1px solid #dee2e6;
-            }
-            
-            details { 
-                margin: 15px 0; 
-            }
-            summary { 
-                cursor: pointer; 
-                padding: 10px; 
-                background: #e9ecef; 
-                border-radius: 5px; 
-                font-weight: bold;
-            }
-            summary:hover { 
-                background: #dee2e6; 
-            }
-            
-            .status-badge {
+            .model-badge {
                 display: inline-block;
-                padding: 5px 12px;
-                border-radius: 20px;
-                font-size: 12px;
+                padding: 8px 16px;
+                border-radius: 25px;
+                font-size: 14px;
                 font-weight: bold;
+                margin: 10px 5px;
+            }
+            .old-badge { 
+                background: linear-gradient(45deg, #e67e22, #f39c12); 
+                color: white; 
+            }
+            .new-badge { 
+                background: linear-gradient(45deg, #27ae60, #2ecc71); 
+                color: white; 
+            }
+            
+            .field-note {
+                font-size: 12px;
+                color: #666;
+                font-style: italic;
                 margin-left: 10px;
             }
-            .status-real { background: #d4edda; color: #155724; }
-            .status-sim { background: #fff3cd; color: #856404; }
-            .status-improved { background: #28a745; color: white; }
         </style>
     </head>
     <body>
@@ -1255,6 +1322,17 @@ def get_results_template():
             <div class="header">
                 <h1>Analysis Results - French ID Card</h1>
                 <p>Processing completed in <strong>{{ report.processing_time }}s</strong> | {{ report.timestamp }}</p>
+                
+                <!-- Model Detection Badge -->
+                {% if report.structured_information.card_model == 'old' %}
+                    <span class="model-badge old-badge">OLD MODEL (Pre-2021)</span>
+                {% elif report.structured_information.card_model == 'new' %}
+                    <span class="model-badge new-badge">NEW MODEL (2021+)</span>
+                {% endif %}
+                
+                {% if report.structured_information.detection_reason %}
+                    <p style="font-size: 14px; margin-top: 10px;">{{ report.structured_information.detection_reason }}</p>
+                {% endif %}
             </div>
             
             <!-- Original image -->
@@ -1286,6 +1364,18 @@ def get_results_template():
                     <p><strong>{{ report.classification.type }}</strong></p>
                 </div>
                 <div class="metric">
+                    <h3>Card Model</h3>
+                    <p><strong>
+                        {% if report.structured_information.card_model == 'old' %}
+                            OLD (Pre-2021)
+                        {% elif report.structured_information.card_model == 'new' %}
+                            NEW (2021+)
+                        {% else %}
+                            {{ report.structured_information.card_model|title }}
+                        {% endif %}
+                    </strong></p>
+                </div>
+                <div class="metric">
                     <h3>Classification Confidence</h3>
                     <p class="{% if report.classification.confidence > 0.8 %}confidence-high{% elif report.classification.confidence > 0.5 %}confidence-medium{% else %}confidence-low{% endif %}">
                         {{ "%.1f"|format(report.classification.confidence * 100) }}%
@@ -1301,101 +1391,42 @@ def get_results_template():
                     <h3>Extracted Words</h3>
                     <p class="confidence-high">{{ report.ocr_result.word_count }}</p>
                 </div>
-                <div class="metric">
-                    <h3>Characters</h3>
-                    <p class="confidence-high">{{ report.ocr_result.character_count }}</p>
-                </div>
-            </div>
-
-            <!-- Detailed classification -->
-            <div class="section info">
-                <h2>Intelligent Classification</h2>
-                <p><strong>Identified type:</strong> {{ report.classification.type }}</p>
-                <p><strong>Confidence:</strong> {{ "%.2f"|format(report.classification.confidence * 100) }}%</p>
-                
-                {% if report.classification.analysis %}
-                <h3>Visual Analysis:</h3>
-                <ul>
-                    <li><strong>Aspect ratio:</strong> {{ report.classification.analysis.aspect_ratio }}</li>
-                    <li><strong>Blue score (ID Card):</strong> {{ report.classification.analysis.blue_score }}</li>
-                    <li><strong>Red score (License):</strong> {{ report.classification.analysis.red_score }}</li>
-                </ul>
-                {% endif %}
-                
-                <h3>Probabilities by Type:</h3>
-                <table>
-                    <thead>
-                        <tr><th>Document Type</th><th>Probability</th><th>Bar</th></tr>
-                    </thead>
-                    <tbody>
-                        {% for doc_type, prob in report.classification.all_probabilities.items() %}
-                        <tr>
-                            <td>{{ doc_type }}</td>
-                            <td>{{ "%.2f"|format(prob * 100) }}%</td>
-                            <td>
-                                <div style="background: #e9ecef; border-radius: 10px; height: 20px; width: 100px; overflow: hidden;">
-                                    <div style="background: linear-gradient(45deg, #667eea, #764ba2); height: 100%; width: {{ prob * 100 }}%; border-radius: 10px;"></div>
-                                </div>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
             </div>
 
             <!-- OCR extraction -->
             <div class="section info">
-                <h2>OCR Text Extraction (Enhanced Method)</h2>
+                <h2>OCR Text Extraction</h2>
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 15px 0;">
                     <div><strong>Method:</strong> {{ report.ocr_result.method }}</div>
                     <div><strong>Confidence:</strong> {{ "%.1f"|format(report.ocr_result.confidence * 100) }}%</div>
                     <div><strong>OCR Time:</strong> {{ report.ocr_result.processing_time }}s</div>
                     <div><strong>Words detected:</strong> {{ report.ocr_result.word_count }}</div>
-                    {% if report.ocr_result.is_confident is defined %}
-                    <div><strong>Extraction:</strong> 
-                        {% if report.ocr_result.is_confident %}
-                            <span style="color: #28a745; font-weight: bold;">High Confidence</span>
-                        {% else %}
-                            <span style="color: #dc3545; font-weight: bold;">Low Confidence</span>
-                        {% endif %}
-                    </div>
-                    {% endif %}
                 </div>
                 
                 <h3>Extracted Text:</h3>
                 <div class="text-extract">{{ report.ocr_result.raw_text }}</div>
-                
-                {% if report.has_real_ocr %}
-                {% else %}
-                <div style="margin-top: 15px; padding: 15px; background-color: #fff3cd; border-radius: 8px; border-left: 5px solid #ffc107;">
-                    <strong>Note:</strong> Simulated data - Install Tesseract for real OCR:
-                    <code>brew install tesseract tesseract-lang</code>
-                </div>
-                {% endif %}
             </div>
 
-            <!-- Structured information - MODIFIÉ pour nouvelles CI -->
-            <div class="section info">
-                <h2>Extracted Information - French ID Card</h2>
+            <!-- Adaptive Information Display -->
+            <div class="section {% if report.structured_information.card_model == 'old' %}old-model{% else %}new-model{% endif %}">
+                <h2>Extracted Information - {{ report.structured_information.document_subtype or report.structured_information.document_type }}</h2>
+                
                 <p><strong>Document type:</strong> {{ report.structured_information.document_type }}</p>
                 {% if report.structured_information.extraction_method %}
                 <p><strong>Extraction method:</strong> {{ report.structured_information.extraction_method }}</p>
                 {% endif %}
-                {% if report.structured_information.document_detection %}
-                <p><strong>Automatic detection:</strong> {{ report.structured_information.document_detection }}</p>
-                {% endif %}
                 
                 <table>
                     <thead>
-                        <tr><th>Field</th><th>Extracted Value</th><th>Status</th></tr>
+                        <tr><th>Field</th><th>Extracted Value</th><th>Status</th><th>Notes</th></tr>
                     </thead>
                     <tbody>
                         {% for key, value in report.structured_information.items() %}
-                        {% if key not in ['document_type', 'extraction_method', 'document_detection', 'detected_text', 'note', 'raw_text', 'Height', 'Issue date'] %}
+                        {% if key not in ['document_type', 'document_subtype', 'card_model', 'extraction_method', 'detection_reason', 'detected_text', 'note', 'raw_text'] %}
                         <tr>
                             <td><strong>{{ key.replace('_', ' ').title() }}</strong></td>
                             <td>
-                                {% if key == 'Identity Number' and value != 'Not found' %}
+                                {% if key == 'Identity number' and value != 'Not found' %}
                                     <code style="background: #f8f9fa; padding: 5px; border-radius: 3px; font-weight: bold; color: #007bff;">{{ value }}</code>
                                 {% else %}
                                     {{ value }}
@@ -1408,11 +1439,39 @@ def get_results_template():
                                     <span style="color: #dc3545; font-weight: bold;">❌ Not detected</span>
                                 {% endif %}
                             </td>
+                            <td class="field-note">
+                                {% if key == 'Height' and report.structured_information.card_model == 'old' %}
+                                    Only on old cards
+                                {% elif key == 'Issue date' and report.structured_information.card_model == 'old' %}
+                                    Only on old cards
+                                {% elif key == 'Issuing authority' and report.structured_information.card_model == 'old' %}
+                                    Only on old cards
+                                {% elif key == 'Expiry date' and report.structured_information.card_model == 'new' %}
+                                    Only on new cards
+                                {% elif key == 'Nationality' and report.structured_information.card_model == 'new' %}
+                                    Only on new cards
+                                {% elif key == 'Identity number' and report.structured_information.card_model == 'old' %}
+                                    12 digits (old format)
+                                {% elif key == 'Identity number' and report.structured_information.card_model == 'new' %}
+                                    9 chars (new format)
+                                {% endif %}
+                            </td>
                         </tr>
                         {% endif %}
                         {% endfor %}
                     </tbody>
                 </table>
+                
+                <!-- Model-specific information -->
+                {% if report.structured_information.card_model == 'old' %}
+                <div style="margin-top: 20px; padding: 15px; background-color: #fff3cd; border-radius: 8px; border-left: 5px solid #e67e22;">
+                    <strong>📅 Old Model Features:</strong> This is a pre-2021 French ID card. It includes fields like Height, Issue Date, and Issuing Authority that are not present on newer cards. The identity number is 12 digits long.
+                </div>
+                {% elif report.structured_information.card_model == 'new' %}
+                <div style="margin-top: 20px; padding: 15px; background-color: #d4edda; border-radius: 8px; border-left: 5px solid #28a745;">
+                    <strong>🆕 New Model Features:</strong> This is a 2021+ French ID card with enhanced security features. It includes Nationality and Expiry Date fields, with a 9-character alphanumeric identity number. Height and Issue Date are no longer included.
+                </div>
+                {% endif %}
             </div>
 
             <!-- System information -->
@@ -1426,11 +1485,6 @@ def get_results_template():
                     <div><strong>Tesseract:</strong> {{ report.system_info.tesseract_path }}</div>
                     {% endif %}
                 </div>
-                
-                <details style="margin-top: 20px;">
-                    <summary>View complete JSON data</summary>
-                    <div class="json-view">{{ report | tojson(indent=2) }}</div>
-                </details>
             </div>
 
             <!-- Actions -->
