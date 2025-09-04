@@ -980,9 +980,6 @@ pip3 install pytesseract</code></pre>
     <body>
         <div class="container">
             <h1>Advanced OCR System</h1>
-            <p style="text-align: center; color: #666; font-size: 18px;">
-                Automatic recognition of identity documents with AI + Enhanced extraction
-            </p>
             
             {install_section}
             
@@ -1258,15 +1255,6 @@ def get_results_template():
             <div class="header">
                 <h1>Analysis Results - French ID Card</h1>
                 <p>Processing completed in <strong>{{ report.processing_time }}s</strong> | {{ report.timestamp }}</p>
-                <p>
-                    <strong>OCR Mode:</strong> 
-                    {% if report.has_real_ocr %}
-                        Real Tesseract + Enhanced Method
-                    {% else %}
-                        Simulation
-                        <span class="status-badge status-sim">DEMO</span>
-                    {% endif %}
-                </p>
             </div>
             
             <!-- Original image -->
@@ -1425,10 +1413,6 @@ def get_results_template():
                         {% endfor %}
                     </tbody>
                 </table>
-                
-                <div style="margin-top: 20px; padding: 15px; background-color: #e7f3ff; border-radius: 8px; border-left: 5px solid #007bff;">
-                    <strong>ℹ️ Note:</strong> This interface is optimized for new French ID cards (2021+). Fields like "Height" and "Issue Date" are not displayed as they don't exist on these documents.
-                </div>
             </div>
 
             <!-- System information -->
