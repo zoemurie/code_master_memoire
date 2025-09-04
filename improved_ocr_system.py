@@ -1072,7 +1072,7 @@ if __name__ == '__main__':
     print(f"Français : {'✅ Disponible' if HAS_FRENCH else '❌ Installer tesseract-lang'}")
     print(f"Extraction : ✅ Méthode old_code.py intégrée")
     print(f"Dossier uploads : {os.path.abspath(UPLOAD_FOLDER)}")
-    
+     
     if not HAS_TESSERACT:
         print("\n⚠️ INSTALLATION REQUISE :")
         print("   brew install tesseract tesseract-lang")

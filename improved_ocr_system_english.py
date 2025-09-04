@@ -162,7 +162,6 @@ def detect_id_card_model(text):
     old_model_indicators = [
         'TAILLE',         # Height field (only on old cards)
         'PREFECTURE',     # Issued by prefecture
-        'DELIVRE LE',     # Issue date (only on old cards)
         'VALABLE JUSQU'   # Different expiry format
     ]
     
@@ -182,7 +181,7 @@ def extract_info_old_model(text):
     """
     Information extraction for OLD French ID cards (pre-2021)
     Fields: Identity number (12 digits), Surname, First names, Sex, Date of birth, 
-            Place of birth, Height, Issue date, Issuing authority
+            Place of birth, Height
     """
     # Normalize text and split into lines
     text = text.replace('|', ' ').replace('Ne:', ' ').replace('$', ' ')
@@ -264,34 +263,7 @@ def extract_info_old_model(text):
     if height_match:
         height = height_match.group(1)
         logger.info(f"Height found: '{height}'")
-    
-    # 8. ISSUE DATE - Only on old cards
-    issue_date = None
-    issue_patterns = [
-        r'Délivré\s+le\s+(\d{2}[\.\/]\d{2}[\.\/]\d{4})',
-        r'Issued\s+on\s+(\d{2}[\.\/]\d{2}[\.\/]\d{4})'
-    ]
-    
-    for pattern in issue_patterns:
-        match = re.search(pattern, full_text, re.IGNORECASE)
-        if match:
-            issue_date = match.group(1).replace('/', '.')
-            logger.info(f"Issue date found: '{issue_date}'")
-            break
-    
-    # 9. ISSUING AUTHORITY - Only on old cards
-    issuing_authority = None
-    authority_patterns = [
-        r'(PRÉFECTURE[A-Za-zÀ-ÿ\s]+)',
-        r'(PREFECTURE[A-Za-z\s]+)'
-    ]
-    
-    for pattern in authority_patterns:
-        match = re.search(pattern, full_text, re.IGNORECASE)
-        if match:
-            issuing_authority = match.group(1).strip()
-            logger.info(f"Issuing authority found: '{issuing_authority}'")
-            break
+
     
     # Results for OLD model
     extracted_data = { 
@@ -302,8 +274,6 @@ def extract_info_old_model(text):
         "Date of birth": date_of_birth if date_of_birth else "Not found", 
         "Place of birth": place_of_birth if place_of_birth else "Not found", 
         "Height": height if height else "Not found",
-        "Issue date": issue_date if issue_date else "Not found",
-        "Issuing authority": issuing_authority if issuing_authority else "Not found"
     }
     
     detected_count = sum(1 for v in extracted_data.values() if v != 'Not found')
@@ -1167,7 +1137,7 @@ def get_results_template():
     <!doctype html>
     <html>
     <head>
-        <title>AI Analysis Results - French ID Cards</title>
+        <title>Analysis Results</title>
         <meta charset="UTF-8">
         <style>
             body { 
@@ -1320,19 +1290,8 @@ def get_results_template():
     <body>
         <div class="container">
             <div class="header">
-                <h1>Analysis Results - French ID Card</h1>
+                <h1>Analysis Results</h1>
                 <p>Processing completed in <strong>{{ report.processing_time }}s</strong> | {{ report.timestamp }}</p>
-                
-                <!-- Model Detection Badge -->
-                {% if report.structured_information.card_model == 'old' %}
-                    <span class="model-badge old-badge">OLD MODEL (Pre-2021)</span>
-                {% elif report.structured_information.card_model == 'new' %}
-                    <span class="model-badge new-badge">NEW MODEL (2021+)</span>
-                {% endif %}
-                
-                {% if report.structured_information.detection_reason %}
-                    <p style="font-size: 14px; margin-top: 10px;">{{ report.structured_information.detection_reason }}</p>
-                {% endif %}
             </div>
             
             <!-- Original image -->
@@ -1396,29 +1355,18 @@ def get_results_template():
             <!-- OCR extraction -->
             <div class="section info">
                 <h2>OCR Text Extraction</h2>
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 15px 0;">
-                    <div><strong>Method:</strong> {{ report.ocr_result.method }}</div>
-                    <div><strong>Confidence:</strong> {{ "%.1f"|format(report.ocr_result.confidence * 100) }}%</div>
-                    <div><strong>OCR Time:</strong> {{ report.ocr_result.processing_time }}s</div>
-                    <div><strong>Words detected:</strong> {{ report.ocr_result.word_count }}</div>
-                </div>
-                
-                <h3>Extracted Text:</h3>
                 <div class="text-extract">{{ report.ocr_result.raw_text }}</div>
             </div>
 
             <!-- Adaptive Information Display -->
-            <div class="section {% if report.structured_information.card_model == 'old' %}old-model{% else %}new-model{% endif %}">
+            <div class="section info">
                 <h2>Extracted Information - {{ report.structured_information.document_subtype or report.structured_information.document_type }}</h2>
                 
                 <p><strong>Document type:</strong> {{ report.structured_information.document_type }}</p>
-                {% if report.structured_information.extraction_method %}
-                <p><strong>Extraction method:</strong> {{ report.structured_information.extraction_method }}</p>
-                {% endif %}
                 
                 <table>
                     <thead>
-                        <tr><th>Field</th><th>Extracted Value</th><th>Status</th><th>Notes</th></tr>
+                        <tr><th>Field</th><th>Extracted Value</th><th>Status</th></tr>
                     </thead>
                     <tbody>
                         {% for key, value in report.structured_information.items() %}
@@ -1426,34 +1374,13 @@ def get_results_template():
                         <tr>
                             <td><strong>{{ key.replace('_', ' ').title() }}</strong></td>
                             <td>
-                                {% if key == 'Identity number' and value != 'Not found' %}
-                                    <code style="background: #f8f9fa; padding: 5px; border-radius: 3px; font-weight: bold; color: #007bff;">{{ value }}</code>
-                                {% else %}
-                                    {{ value }}
-                                {% endif %}
+                                {{ value }}
                             </td>
                             <td>
                                 {% if value not in ["Not detected", "Not found"] %}
-                                    <span style="color: #28a745; font-weight: bold;">✅ Detected</span>
+                                    <span style="color: #28a745; font-weight: bold;">Detected</span>
                                 {% else %}
-                                    <span style="color: #dc3545; font-weight: bold;">❌ Not detected</span>
-                                {% endif %}
-                            </td>
-                            <td class="field-note">
-                                {% if key == 'Height' and report.structured_information.card_model == 'old' %}
-                                    Only on old cards
-                                {% elif key == 'Issue date' and report.structured_information.card_model == 'old' %}
-                                    Only on old cards
-                                {% elif key == 'Issuing authority' and report.structured_information.card_model == 'old' %}
-                                    Only on old cards
-                                {% elif key == 'Expiry date' and report.structured_information.card_model == 'new' %}
-                                    Only on new cards
-                                {% elif key == 'Nationality' and report.structured_information.card_model == 'new' %}
-                                    Only on new cards
-                                {% elif key == 'Identity number' and report.structured_information.card_model == 'old' %}
-                                    12 digits (old format)
-                                {% elif key == 'Identity number' and report.structured_information.card_model == 'new' %}
-                                    9 chars (new format)
+                                    <span style="color: #dc3545; font-weight: bold;">Not detected</span>
                                 {% endif %}
                             </td>
                         </tr>
@@ -1461,32 +1388,7 @@ def get_results_template():
                         {% endfor %}
                     </tbody>
                 </table>
-                
-                <!-- Model-specific information -->
-                {% if report.structured_information.card_model == 'old' %}
-                <div style="margin-top: 20px; padding: 15px; background-color: #fff3cd; border-radius: 8px; border-left: 5px solid #e67e22;">
-                    <strong>📅 Old Model Features:</strong> This is a pre-2021 French ID card. It includes fields like Height, Issue Date, and Issuing Authority that are not present on newer cards. The identity number is 12 digits long.
-                </div>
-                {% elif report.structured_information.card_model == 'new' %}
-                <div style="margin-top: 20px; padding: 15px; background-color: #d4edda; border-radius: 8px; border-left: 5px solid #28a745;">
-                    <strong>🆕 New Model Features:</strong> This is a 2021+ French ID card with enhanced security features. It includes Nationality and Expiry Date fields, with a 9-character alphanumeric identity number. Height and Issue Date are no longer included.
-                </div>
-                {% endif %}
             </div>
-
-            <!-- System information -->
-            <div class="section">
-                <h2>System Information</h2>
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px;">
-                    <div><strong>Platform:</strong> {{ report.system_info.platform }}</div>
-                    <div><strong>OpenCV:</strong> {{ report.system_info.opencv_version }}</div>
-                    <div><strong>Method:</strong> {{ report.system_info.extraction_method }}</div>
-                    {% if report.system_info.tesseract_path %}
-                    <div><strong>Tesseract:</strong> {{ report.system_info.tesseract_path }}</div>
-                    {% endif %}
-                </div>
-            </div>
-
             <!-- Actions -->
             <div style="text-align: center;">
                 <a href="{{ url_for('index') }}" class="back-button">Analyze Another Document</a>
