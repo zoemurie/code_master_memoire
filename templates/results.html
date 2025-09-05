@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+
+{% block title %}Analysis Results - Advanced OCR System{% endblock %}
+
+{% block content %}
+<div class="header">
+    <h1>Analysis Results</h1>
+    <p>Processing completed in <strong>{{ report.processing_time }}s</strong> | {{ report.timestamp }}</p>
+</div>
+
+<!-- Original image -->
+<div class="section">
+    <h2>Analyzed Document</h2>
+    <div class="image-container">
+        <div class="image-item">
+            <img src="{{ url_for('uploaded_file', filename=filename) }}" class="image-preview" alt="Original Document">
+            <p><strong>Original Image</strong></p>
+        </div>
+        {% if report.ocr_result.processed_image_path %}
+        <div class="image-item">
+            <img src="{{ url_for('uploaded_file', filename=report.ocr_result.processed_image_path.split('/')[-1]) }}" class="image-preview" alt="Preprocessed Document">
+            <p><strong>Preprocessed Image</strong></p>
+        </div>
+        {% endif %}
+    </div>
+    <p><strong>File:</strong> {{ filename }}</p>
+</div>
+
+<!-- Performance metrics -->
+<div class="metrics">
+    <div class="metric">
+        <h3>Total Time</h3>
+        <p class="confidence-high">{{ report.processing_time }}s</p>
+    </div>
+    <div class="metric">
+        <h3>Detected Type</h3>
+        <p><strong>{{ report.classification.type }}</strong></p>
+    </div>
+    <div class="metric">
+        <h3>Card Model</h3>
+        <p><strong>
+            {% if report.structured_information.card_model == 'old' %}
+                OLD (Pre-2021)
+            {% elif report.structured_information.card_model == 'new' %}
+                NEW (2021+)
+            {% else %}
+                {{ report.structured_information.card_model|title }}
+            {% endif %}
+        </strong></p>
+    </div>
+    <div class="metric">
+        <h3>Classification Confidence</h3>
+        <p class="{% if report.classification.confidence > 0.8 %}confidence-high{% elif report.classification.confidence > 0.5 %}confidence-medium{% else %}confidence-low{% endif %}">
+            {{ "%.1f"|format(report.classification.confidence * 100) }}%
+        </p>
+    </div>
+    <div class="metric">
+        <h3>OCR Confidence</h3>
+        <p class="{% if report.ocr_result.confidence > 0.8 %}confidence-high{% elif report.ocr_result.confidence > 0.5 %}confidence-medium{% else %}confidence-low{% endif %}">
+            {{ "%.1f"|format(report.ocr_result.confidence * 100) }}%
+        </p>
+    </div>
+    <div class="metric">
+        <h3>Extracted Words</h3>
+        <p class="confidence-high">{{ report.ocr_result.word_count }}</p>
+    </div>
+</div>
+
+<!-- OCR extraction -->
+<div class="section info">
+    <h2>OCR Text Extraction</h2>
+    <div class="text-extract">{{ report.ocr_result.raw_text }}</div>
+</div>
+
+<!-- Adaptive Information Display -->
+<div class="section info">
+    <h2>Extracted Information - {{ report.structured_information.document_subtype or report.structured_information.document_type }}</h2>
+    
+    <p><strong>Document type:</strong> {{ report.structured_information.document_type }}</p>
+    
+    {% if report.structured_information.card_model == 'old' %}
+        <span class="model-badge old-badge">OLD MODEL (Pre-2021)</span>
+    {% elif report.structured_information.card_model == 'new' %}
+        <span class="model-badge new-badge">NEW MODEL (2021+)</span>
+    {% endif %}
+    
+    <table>
+        <thead>
+            <tr><th>Field</th><th>Extracted Value</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+            {% for key, value in report.structured_information.items() %}
+            {% if key not in ['document_type', 'document_subtype', 'card_model', 'extraction_method', 'detection_reason', 'detected_text', 'note', 'raw_text'] %}
+            <tr>
+                <td><strong>{{ key.replace('_', ' ').title() }}</strong></td>
+                <td>{{ value }}</td>
+                <td>
+                    {% if value not in ["Not detected", "Not found"] %}
+                        <span style="color: #28a745; font-weight: bold;">✓ Detected</span>
+                    {% else %}
+                        <span style="color: #dc3545; font-weight: bold;">✗ Not detected</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Classification Details -->
+<div class="section">
+    <h2>Classification Analysis</h2>
+    <p><strong>Document Type:</strong> {{ report.classification.type }}</p>
+    <p><strong>Confidence:</strong> {{ "%.1f"|format(report.classification.confidence * 100) }}%</p>
+    
+    {% if report.classification.analysis %}
+    <h3>Analysis Details:</h3>
+    <ul>
+        <li><strong>Aspect Ratio:</strong> {{ report.classification.analysis.aspect_ratio }}</li>
+        <li><strong>Blue Score:</strong> {{ report.classification.analysis.blue_score }}</li>
+        <li><strong>Red Score:</strong> {{ report.classification.analysis.red_score }}</li>
+        <li><strong>French ID Score:</strong> {{ report.classification.analysis.french_id_score }}</li>
+        <li><strong>Text Score:</strong> {{ report.classification.analysis.text_score }}</li>
+    </ul>
+    {% endif %}
+</div>
+
+<!-- System Information -->
+<div class="section">
+    <h2>System Information</h2>
+    <table>
+        <tbody>
+            <tr>
+                <td><strong>OCR Engine</strong></td>
+                <td>
+                    {% if report.has_real_ocr %}
+                        Tesseract OCR (Real)
+                    {% else %}
+                        Simulation Mode
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <td><strong>French Language</strong></td>
+                <td>
+                    {% if report.has_french %}
+                        Available
+                    {% else %}
+                        Not Available
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <td><strong>Processing Method</strong></td>
+                <td>{{ report.system_info.extraction_method }}</td>
+            </tr>
+            <tr>
+                <td><strong>OpenCV Version</strong></td>
+                <td>{{ report.system_info.opencv_version }}</td>
+            </tr>
+            <tr>
+                <td><strong>Platform</strong></td>
+                <td>{{ report.system_info.platform }}</td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- Actions -->
+<div class="actions">
+    <a href="{{ url_for('index') }}" class="back-button">Analyze Another Document</a>
+</div>
+{% endblock %}
