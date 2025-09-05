@@ -126,47 +126,6 @@
     {% endif %}
 </div>
 
-<!-- System Information -->
-<div class="section">
-    <h2>System Information</h2>
-    <table>
-        <tbody>
-            <tr>
-                <td><strong>OCR Engine</strong></td>
-                <td>
-                    {% if report.has_real_ocr %}
-                        Tesseract OCR (Real)
-                    {% else %}
-                        Simulation Mode
-                    {% endif %}
-                </td>
-            </tr>
-            <tr>
-                <td><strong>French Language</strong></td>
-                <td>
-                    {% if report.has_french %}
-                        Available
-                    {% else %}
-                        Not Available
-                    {% endif %}
-                </td>
-            </tr>
-            <tr>
-                <td><strong>Processing Method</strong></td>
-                <td>{{ report.system_info.extraction_method }}</td>
-            </tr>
-            <tr>
-                <td><strong>OpenCV Version</strong></td>
-                <td>{{ report.system_info.opencv_version }}</td>
-            </tr>
-            <tr>
-                <td><strong>Platform</strong></td>
-                <td>{{ report.system_info.platform }}</td>
-            </tr>
-        </tbody>
-    </table>
-</div>
-
 <!-- Actions -->
 <div class="actions">
     <a href="{{ url_for('index') }}" class="back-button">Analyze Another Document</a>

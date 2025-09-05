@@ -5,17 +5,6 @@
 {% block content %}
 <h1>Advanced OCR System</h1>
 
-<!-- System Status -->
-<div class="status {{ status_class }}">
-    {% if status_class == 'success' %}
-        ✅ {{ status }}
-    {% elif status_class == 'warning' %}
-        ⚠️ {{ status }}
-    {% else %}
-        ❌ {{ status }}
-    {% endif %}
-</div>
-
 <!-- Installation Info (if needed) -->
 {% if show_install %}
 <div class="install-info">
@@ -35,31 +24,4 @@ pip3 install pytesseract</code></pre>
         <input type="submit" value="Analyze">
     </div>
 </form>
-
-<!-- Features Section -->
-<div class="features">
-    <div class="new-feature">
-        🆕 Enhanced with old_code.py extraction method for better accuracy
-    </div>
-    
-    <div class="feature">
-        <h3>🔍 Advanced Document Classification</h3>
-        <p>Automatically detects French ID cards (old and new models), passports, and driver licenses using computer vision techniques.</p>
-    </div>
-    
-    <div class="feature">
-        <h3>🎯 Adaptive Information Extraction</h3>
-        <p>Different extraction algorithms for old (pre-2021) and new (2021+) French ID cards, ensuring optimal field detection.</p>
-    </div>
-    
-    <div class="feature">
-        <h3>🔧 Image Preprocessing</h3>
-        <p>Automatic skew correction, noise reduction, and binarization for improved OCR accuracy.</p>
-    </div>
-    
-    <div class="feature">
-        <h3>📊 Confidence Metrics</h3>
-        <p>Real-time confidence scoring for both document classification and text extraction accuracy.</p>
-    </div>
-</div>
 {% endblock %}

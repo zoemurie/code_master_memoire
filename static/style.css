@@ -49,6 +49,10 @@ h3 {
     border-radius: 10px;
 }
 
+.header h1 {
+    color: white !important;
+}
+
 /* Upload Area */
 .upload-area {
     border: 3px dashed #ddd;
