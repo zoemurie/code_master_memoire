@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 import logging
 from werkzeug.utils import secure_filename
+import pytesseract
 
 from config import Config, HAS_TESSERACT, HAS_FRENCH
 from ocr_processor import extract_text_with_ocr
@@ -139,6 +140,8 @@ if __name__ == '__main__':
     print("STARTING ADVANCED OCR SYSTEM v2.0 (ENHANCED METHOD)")
     print("=" * 70)
     print(f"Web interface: http://localhost:8080")
+    if HAS_TESSERACT:
+        print(f"Tesseract version: {pytesseract.get_tesseract_version()}")
     print(f"Real OCR: {'✅ Enabled' if HAS_TESSERACT else '❌ Install Tesseract'}")
     print(f"French: {'✅ Available' if HAS_FRENCH else '❌ Install tesseract-lang'}")
     print(f"Extraction: ✅ old_code.py method integrated")
