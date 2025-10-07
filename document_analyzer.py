@@ -298,7 +298,7 @@ class DocumentProcessor:
     """Document processor optimized for macOS - with improved extraction"""
     
     def __init__(self):
-        self.document_classes = ['ID Card', 'Passport', 'Driver License', 'Other']
+        self.document_classes = ['ID Card', 'Passport', 'Other']
         self.has_tesseract = HAS_TESSERACT
         self.has_french = HAS_FRENCH
         logger.info(f"Processor initialized - OCR: {self.has_tesseract}, French: {self.has_french}")
@@ -326,13 +326,6 @@ class DocumentProcessor:
                 (blue_score > 0.05 and 1.4 < aspect_ratio < 2.0)):
                 doc_type = 'ID Card'
                 confidence = min(0.85 + (french_id_score + text_score + blue_score) * 0.3, 0.95)
-            elif 1.4 < aspect_ratio < 1.9:
-                if red_score > 0.08:  # Driver license
-                    doc_type = 'Driver License'
-                    confidence = min(0.80 + red_score * 0.15, 0.90)
-                else:
-                    doc_type = 'ID Card'  # Default for card format
-                    confidence = 0.75
             elif aspect_ratio > 2.0 and french_id_score < 0.05 and text_score < 0.05:
                 doc_type = 'Passport'
                 confidence = 0.70
@@ -538,13 +531,6 @@ class DocumentProcessor:
                 'card_model': 'passport',
                 'detected_text': raw_text[:300] + "..." if len(raw_text) > 300 else raw_text,
                 'note': 'Passport parser in development'
-            }
-        elif doc_type == 'Driver License':
-            return {
-                'document_type': 'Driver License',
-                'card_model': 'license',
-                'detected_text': raw_text[:300] + "..." if len(raw_text) > 300 else raw_text,
-                'note': 'Driver license parser in development'
             }
         else:
             return {
