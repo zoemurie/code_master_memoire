@@ -9,7 +9,6 @@ from config import HAS_TESSERACT, HAS_FRENCH
 logger = logging.getLogger(__name__)
 
 def correct_skew(image_path): 
-    """Image skew correction - old_code.py version"""
     img = cv2.imread(image_path) 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) 
     # Edge detection 
@@ -36,7 +35,6 @@ def correct_skew(image_path):
     return image_path # Return original image if no angle detected 
 
 def preprocess_image(image_path): 
-    """Image preprocessing - old_code.py version"""
     # Skew correction 
     corrected_path = correct_skew(image_path) 
     img = cv2.imread(corrected_path, cv2.IMREAD_GRAYSCALE) 
@@ -50,7 +48,6 @@ def preprocess_image(image_path):
     return preprocessed_path 
 
 def extract_info_with_confidence(image_path): 
-    """Text extraction with confidence - old_code.py version"""
     # Load preprocessed image 
     img = Image.open(image_path) 
 
@@ -129,7 +126,6 @@ No.: 987654321098"""
     }
 
 def extract_text_with_ocr(image_path):
-    """Text extraction with improved method from old_code.py"""
     if not HAS_TESSERACT:
         return simulate_ocr_extraction(image_path)
     
